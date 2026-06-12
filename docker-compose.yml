@@ -1,5 +1,3 @@
-version: '3.7'
-
 services:
   # =========================================================================
   # Redpanda: Event broker compatible with Kafka API.

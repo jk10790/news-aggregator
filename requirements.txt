@@ -11,6 +11,8 @@ uvicorn[standard]==0.34.0
 # AI & LLM Clients
 google-genai==1.2.0
 groq==0.18.0
+openai==1.61.0
+ollama==0.4.7
 sentence-transformers==3.3.1
 
 # Data Validation & Utilities

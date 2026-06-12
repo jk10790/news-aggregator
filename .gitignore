@@ -19,6 +19,8 @@ __pycache__/
 .env
 .env.local
 
+DEVELOPMENT_GUIDE.md
+
 # Database / local data volumes
 data/
 chroma_data/

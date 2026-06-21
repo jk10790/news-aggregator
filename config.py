@@ -22,10 +22,10 @@ The user is highly interested in the following topics:
 1. Distributed Systems: Event-driven architecture, message brokers (Kafka, Redpanda), system scalability, Docker, Kubernetes, and cloud infrastructure.
 2. Generative AI & LLMs: Large Language Models, prompt engineering, RAG (Retrieval-Augmented Generation), vector databases (ChromaDB, Milvus, pgvector), local LLMs (Ollama), and agentic workflows.
 3. Software Engineering: Python, async programming, API development, and software design principles.
+4. Sports, entertainment, celebrity gossip, and movies.
 
 The user is NOT interested in:
 - General politics, economy, and financial markets (unless directly related to major tech companies).
-- Sports, entertainment, celebrity gossip, and movies.
 - Marketing, advertising strategies, and non-technical business news.
 """
 
@@ -53,6 +53,8 @@ else:
     MAX_RETRIES = 3
 
 REDPANDA_BROKER = os.getenv("REDPANDA_BROKER", "localhost:9092")
+CHROMA_SERVER_HOST = os.getenv("CHROMA_SERVER_HOST", "localhost")
+CHROMA_SERVER_PORT = os.getenv("CHROMA_SERVER_PORT", "8000")
 
 # Kafka/Redpanda Topics we will use
 TOPIC_RAW_ARTICLES = "raw-articles"

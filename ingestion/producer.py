@@ -2,9 +2,16 @@ import asyncio
 import json
 import logging
 import html
+import os
+import sys
 import feedparser
+
+# Dynamic path resolution to import config from parent directory (project root)
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from aiokafka import AIOKafkaProducer
 from config import RSS_FEEDS, REDPANDA_BROKER, TOPIC_RAW_ARTICLES
+from models import ArticleRaw
 
 # Setup logging to print nicely in the console
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -30,14 +37,14 @@ async def fetch_and_parse_feed(feed_name: str, feed_url: str) -> list:
             import re
             clean_summary = re.sub(r'<[^>]+>', '', clean_summary).strip()
             
-            article = {
-                "source": feed_name,
-                "title": entry.get("title", "No Title"),
-                "link": entry.get("link", ""),
-                "summary": clean_summary,
-                "published": entry.get("published", entry.get("updated", "Unknown Date")),
-                "author": entry.get("author", "Unknown Author")
-            }
+            article = ArticleRaw(
+                source=feed_name,
+                title=entry.get("title", "No Title"),
+                link=entry.get("link", ""),
+                summary=clean_summary,
+                published=entry.get("published", entry.get("updated", "Unknown Date")),
+                author=entry.get("author", "Unknown Author")
+            )
             articles.append(article)
             
         logger.info(f"Successfully parsed {len(articles)} articles from '{feed_name}'.")
@@ -70,8 +77,8 @@ async def main():
         # 3. Publish each article to the 'raw-articles' topic
         published_count = 0
         for article in all_articles:
-            # Serialize the article dict to a JSON string, then encode it to bytes
-            serialized_article = json.dumps(article).encode("utf-8")
+            # Serialize the Pydantic model directly to JSON and encode to bytes
+            serialized_article = article.model_dump_json().encode("utf-8")
             
             # Send message to Redpanda and wait for acknowledgment
             await producer.send_and_wait(TOPIC_RAW_ARTICLES, value=serialized_article)

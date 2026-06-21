@@ -2,15 +2,21 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from google import genai
 from google.genai import types
 import ollama
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+
+# Dynamic path resolution to import config from parent directory (project root)
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from config import (
     LLM_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_HOST, OLLAMA_MODEL,
     REDPANDA_BROKER, TOPIC_RAW_ARTICLES, TOPIC_VERIFIED_ARTICLES,
     USER_INTERESTS, RATE_DELAY_SECONDS, BACKOFF_BASE_SECONDS, MAX_RETRIES
 )
+from models import ArticleRaw, ArticleVerified
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -120,18 +126,14 @@ async def main():
                 logger.info("No raw articles received for 5 seconds. Assuming queue is drained.")
                 break
                 
-            # Decode the raw article from bytes to JSON
-            raw_data = json.loads(msg.value.decode("utf-8"))
+            # Decode and validate the message using our ArticleRaw contract
+            article = ArticleRaw.model_validate_json(msg.value.decode("utf-8"))
             total_processed += 1
             
-            title = raw_data.get("title", "No Title")
-            source = raw_data.get("source", "Unknown")
-            summary = raw_data.get("summary", "")
-            
-            logger.info(f"[{total_processed}] Triaging: '{title}' ({source})")
+            logger.info(f"[{total_processed}] Triaging: '{article.title}' ({article.source})")
             
             # 4. Query LLM for triage decision
-            decision = await query_llm_triage(title, source, summary)
+            decision = await query_llm_triage(article.title, article.source, article.summary)
             
             # Sleep to respect provider-specific rate constraints
             if RATE_DELAY_SECONDS > 0:
@@ -144,11 +146,14 @@ async def main():
                 accepted_count += 1
                 logger.info(f"   🟢 ACCEPTED: {reasoning}")
                 
-                # Append triage explanation to metadata
-                raw_data["triage_reason"] = reasoning
+                # Instantiate the ArticleVerified contract
+                verified_article = ArticleVerified(
+                    **article.model_dump(),
+                    triage_reason=reasoning
+                )
                 
-                # Publish to 'verified-articles' topic
-                serialized_verified = json.dumps(raw_data).encode("utf-8")
+                # Publish the serialized verified article to Redpanda
+                serialized_verified = verified_article.model_dump_json().encode("utf-8")
                 await producer.send_and_wait(TOPIC_VERIFIED_ARTICLES, value=serialized_verified)
             else:
                 logger.info(f"   🔴 REJECTED: {reasoning}")

@@ -1,0 +1,123 @@
+import hashlib
+import logging
+import os
+import re
+import sys
+
+# Dynamic path resolution to import from parent directory (project root)
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from sentence_transformers import SentenceTransformer
+import chromadb
+from config import CHROMA_SERVER_HOST, CHROMA_SERVER_PORT
+from models import ArticleVerified
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# Initialize the local embedding model on load
+logger.info("Loading local embedding model 'all-MiniLM-L6-v2'...")
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+logger.info("Embedding model loaded successfully.")
+
+# Connect to the remote ChromaDB container
+logger.info(f"Connecting to ChromaDB at HTTP {CHROMA_SERVER_HOST}:{CHROMA_SERVER_PORT}...")
+chroma_client = chromadb.HttpClient(host=CHROMA_SERVER_HOST, port=int(CHROMA_SERVER_PORT))
+
+def get_or_create_collection():
+    """Retrieves or creates the target vector collection."""
+    return chroma_client.get_or_create_collection(
+        name="news_archive",
+        metadata={"hnsw:space": "cosine"}
+    )
+
+def generate_url_hash(url: str) -> str:
+    """Generates a short MD5 hash of the URL to act as a deterministic primary key."""
+    return hashlib.md5(url.encode("utf-8")).hexdigest()
+
+def chunk_text(text: str) -> list[str]:
+    """
+    Performs basic semantic chunking.
+    Splits text by sentence boundaries and groups them into chunks of ~2-3 sentences.
+    """
+    sentences = re.split(r'(?<=[.!?]) +', text.strip())
+    chunks = []
+    current_chunk = []
+    current_word_count = 0
+    
+    for sentence in sentences:
+        if not sentence:
+            continue
+        words = len(sentence.split())
+        
+        if current_word_count + words > 60 and current_chunk:
+            chunks.append(" ".join(current_chunk))
+            current_chunk = []
+            current_word_count = 0
+            
+        current_chunk.append(sentence)
+        current_word_count += words
+        
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+        
+    return chunks
+
+def store_article(article: ArticleVerified):
+    """
+    Splits an article into parent and child chunks, embeds the children,
+    and inserts them into ChromaDB.
+    """
+    collection = get_or_create_collection()
+    
+    url = article.link
+    parent_id = f"parent_{generate_url_hash(url)}"
+    
+    # 1. Store the Parent Document (Title + Summary) without embeddings
+    parent_text = f"Title: {article.title}\nSummary: {article.summary}"
+    
+    logger.info(f"Storing Parent Document: {parent_id} | '{article.title}'")
+    collection.add(
+        ids=[parent_id],
+        documents=[parent_text],
+        metadatas=[{
+            "type": "parent",
+            "title": article.title,
+            "url": url,
+            "source": article.source,
+            "published": article.published,
+            "triage_reason": article.triage_reason
+        }]
+    )
+    
+    # 2. Chunk the text into Child segments
+    child_chunks = chunk_text(article.summary)
+    if not child_chunks:
+        child_chunks = [article.summary]
+        
+    logger.info(f"Split article into {len(child_chunks)} child chunks. Generating embeddings...")
+    
+    # 3. Generate embeddings for all child chunks locally
+    child_embeddings = embedding_model.encode(child_chunks).tolist()
+    
+    # 4. Store the Child Documents
+    child_ids = []
+    child_metadatas = []
+    
+    for idx, chunk in enumerate(child_chunks):
+        child_ids.append(f"child_{generate_url_hash(url)}_chunk_{idx}")
+        child_metadatas.append({
+            "type": "child",
+            "parent_id": parent_id,
+            "source": article.source,
+            "url": url
+        })
+        
+    collection.add(
+        ids=child_ids,
+        documents=child_chunks,
+        embeddings=child_embeddings,
+        metadatas=child_metadatas
+    )
+    logger.info(f"Successfully indexed parent {parent_id} and {len(child_ids)} child chunks.")

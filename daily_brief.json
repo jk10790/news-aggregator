@@ -1,0 +1,464 @@
+{
+  "date": "2026-06-21",
+  "headline_summary": "Enterprise AI continues to expand with new AWS Bedrock features and significant funding for AI inference, while core software development progresses with Java's Project Valhalla and new TypeScript, amidst critical discussions on AI ethics and ongoing cybersecurity threats like widespread GitHub malware.",
+  "categories": [
+    {
+      "name": "Generative AI & Machine Learning",
+      "articles": [
+        {
+          "title": "Introducing Amazon Bedrock Managed Knowledge Base for faster, more accurate enterprise AI applications",
+          "url": "https://aws.amazon.com/blogs/aws/introducing-amazon-bedrock-managed-knowledge-base-for-faster-more-accurate-enterprise-ai-applications/",
+          "key_insights": [
+            "Provides fully managed knowledge bases to simplify building enterprise RAG pipelines with native data connectors.",
+            "Features smart parsing for automatic multi-format data preparation and an Agentic Retriever for complex multi-step queries via AgentCore Gateway.",
+            "Enables developers to focus on business outcomes by abstracting infrastructure management for AI applications."
+          ]
+        },
+        {
+          "title": "Announcing Web Search on Amazon Bedrock AgentCore: Ground your AI agents in current, accurate web knowledge",
+          "url": "https://aws.amazon.com/blogs/aws/announcing-web-search-on-amazon-bedrock-agentcore-ground-your-ai-agents-in-current-accurate-web-knowledge/",
+          "key_insights": [
+            "Web Search on Amazon Bedrock AgentCore allows AI agents to ground responses in current, cited web knowledge.",
+            "Ensures zero data egress from the customer's secured AWS environment."
+          ]
+        },
+        {
+          "title": "Anthropic Claude Fable 5 on AWS: Mythos class capabilities with built-in safeguards, now available",
+          "url": "https://aws.amazon.com/blogs/aws/anthropic-claude-fable-5-on-aws-mythos-class-capabilities-with-built-in-safeguards-now-available/",
+          "key_insights": [
+            "AWS announces availability of Claude Fable 5 on Amazon Bedrock and Claude Platform on AWS.",
+            "Delivers Mythos-level capabilities with strong built-in safeguards for broader, safer use."
+          ]
+        },
+        {
+          "title": "Try the new console experience in Amazon Bedrock, optimized for Anthropic- and OpenAI-compatible APIs",
+          "url": "https://aws.amazon.com/blogs/aws/try-the-new-console-experience-in-amazon-bedrock-optimized-for-anthropic-and-openai-compatible-apis/",
+          "key_insights": [
+            "New console experience on Amazon Bedrock allows side-by-side comparison of the latest AI models.",
+            "Offers streamlined evaluation workflows, project-aware live documentation, and auto-prefilled code snippets."
+          ]
+        },
+        {
+          "title": "Source: Elastic agrees to buy CRV-backed DeductiveAI for up to $85M",
+          "url": "https://techcrunch.com/2026/06/18/source-elastic-agrees-to-buy-crv-backed-deductiveai-for-up-to-85m/",
+          "key_insights": [
+            "Elastic has agreed to acquire DeductiveAI, an AI startup specializing in catching and resolving software bugs.",
+            "The acquisition, valued at up to $85 million, follows DeductiveAI's founding three years ago with CRV backing."
+          ]
+        },
+        {
+          "title": "AI inference startup Baseten reportedly raising $1.5B months after its last mega-round",
+          "url": "https://techcrunch.com/2026/06/18/ai-inference-startup-baseten-reportedly-raising-1-5b-months-after-its-last-mega-round/",
+          "key_insights": [
+            "AI inference startup Baseten is reportedly raising $1.5 billion, boosting its valuation to an estimated $13 billion.",
+            "This funding round reflects the ongoing 'inference gold rush' driving interest in AI technology."
+          ]
+        },
+        {
+          "title": "Snap spins off AI video team into new company, Dotmo, due to costs",
+          "url": "https://techcrunch.com/2026/06/18/snap-spins-off-ai-video-team-into-new-company-dotmo-due-to-costs/",
+          "key_insights": [
+            "Snapchat has spun off its AI video team into a new company, Dotmo, citing cost concerns.",
+            "Dotmo will focus on AI video development with staff transitioning from Snap."
+          ]
+        },
+        {
+          "title": "Amazon hopes to challenge Nvidia more directly by selling its AI chips",
+          "url": "https://techcrunch.com/2026/06/18/amazon-hopes-to-challenge-nvidia-more-directly-by-selling-its-ai-chips/",
+          "key_insights": [
+            "AWS is in discussions to sell its custom AI chips to other data centers, targeting a $50 billion opportunity.",
+            "CEO Andy Jassy emphasizes this initiative as a key strategic focus for Amazon."
+          ]
+        },
+        {
+          "title": "Announcing Amazon EC2 G7 instances accelerated by NVIDIA RTX PRO 4500 Blackwell Server Edition GPUs",
+          "url": "https://aws.amazon.com/blogs/aws/announcing-amazon-ec2-g7-instances-accelerated-by-nvidia-rtx-pro-4500-blackwell-server-edition-gpus/",
+          "key_insights": [
+            "Amazon EC2 G7 instances are now available, featuring NVIDIA RTX PRO 4500 Blackwell Server Edition GPUs.",
+            "These instances provide high-performance GPU acceleration for AI inference, graphics, and data analytics workloads."
+          ]
+        },
+        {
+          "title": "AWS WAF adds AI traffic monetization capability to help content owners charge AI bots for content access",
+          "url": "https://aws.amazon.com/blogs/aws/aws-waf-adds-ai-traffic-monetization-capability-to-help-content-owners-charge-ai-bots-for-content-access/",
+          "key_insights": [
+            "AWS WAF launched AI traffic monetization, a Bot Control feature enabling content providers to charge AI bots for API and content access.",
+            "Allows content owners to set prices, accept payments, and grant scoped access directly at the edge."
+          ]
+        },
+        {
+          "title": "Beyond Siri: Here are the practical AI features coming to your iPhone in iOS 27",
+          "url": "https://techcrunch.com/2026/06/21/beyond-siri-here-are-the-practical-ai-features-coming-to-your-iphone-in-ios-27/",
+          "key_insights": [
+            "Apple is introducing several AI-powered features in iOS 27, including advanced image recognition, improved voice assistants, and personalized recommendations.",
+            "These updates encompass new Siri AI and Apple Intelligence upgrades."
+          ]
+        },
+        {
+          "title": "Almost half of US singles feel negatively about AI in dating, Match says",
+          "url": "https://techcrunch.com/2026/06/18/almost-half-of-u-s-singles-feel-negatively-about-ai-in-dating-match-says/",
+          "key_insights": [
+            "A Match survey found 47% of US singles feel negatively about AI in dating.",
+            "Many users are open to AI assistance for profile optimization and conversation starters, highlighting mixed views."
+          ]
+        },
+        {
+          "title": "Signal’s Meredith Whittaker wants you to remember that AI chatbots ‘are not your friends’",
+          "url": "https://techcrunch.com/2026/06/20/signals-meredith-whittaker-wants-you-to-remember-that-ai-chatbots-are-not-your-friends/",
+          "key_insights": [
+            "Security researcher Meredith Whittaker emphasizes the need to recognize AI chatbots for what they are.",
+            "She cautions against anthropomorphizing AI systems or treating them as conscious entities."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Cloud & Distributed Systems",
+      "articles": [
+        {
+          "title": "Top announcements of the AWS Summit in New York, 2026",
+          "url": "https://aws.amazon.com/blogs/aws/top-announcements-of-the-aws-summit-in-new-york-2026/",
+          "key_insights": [
+            "Amazon S3 and Amazon EC2 capacity increased by 80%.",
+            "Amazon Aurora was announced to support PostgreSQL database."
+          ]
+        },
+        {
+          "title": "Proactively reduce tech debt autonomously with AWS Transform – continuous modernization (preview)",
+          "url": "https://aws.amazon.com/blogs/aws/proactively-reduce-tech-debt-autonomously-with-aws-transform-continuous-modernization-preview/",
+          "key_insights": [
+            "AWS Transform automatically scans code repositories to detect, prioritize, and remediate technical debt at scale.",
+            "Uses a machine learning-based approach for improved accuracy over time."
+          ]
+        },
+        {
+          "title": "AWS DevOps Agent adds release management capabilities to assess code changes before production (preview)",
+          "url": "https://aws.amazon.com/blogs/aws/aws-devops-agent-adds-release-management-capabilities-to-assess-code-changes-before-production-preview/",
+          "key_insights": [
+            "AWS DevOps Agent now includes release management capabilities for reviewing code changes for release readiness.",
+            "Features autonomous release testing to assess code changes before production deployment."
+          ]
+        },
+        {
+          "title": "AWS Security Agent adds threat modeling, Kiro power and Claude Code plugin, and more",
+          "url": "https://aws.amazon.com/blogs/aws/aws-security-agent-adds-threat-modeling-kiro-power-and-claude-code-plugin-and-more/",
+          "key_insights": [
+            "AWS Security Agent adds STRIDE-based threat modeling.",
+            "Offers full repository and pull request code scanning with remediation across major Git platforms."
+          ]
+        },
+        {
+          "title": "Amazon S3 Annotations: Attach rich queryable context directly to your objects",
+          "url": "https://aws.amazon.com/blogs/aws/amazon-s3-annotations-attach-rich-queryable-context-directly-to-your-objects/",
+          "key_insights": [
+            "Amazon S3 now supports attaching up to 1 GB of rich, mutable, and queryable context directly to objects using annotations.",
+            "Designed for AI agents and autonomous workflows to discover, understand, and act on data at scale without separate metadata systems."
+          ]
+        },
+        {
+          "title": "Now available – Amazon EC2 M9g and M9gd instances powered by new AWS Graviton5 processors",
+          "url": "https://aws.amazon.com/blogs/aws/now-available-amazon-ec2-m9g-and-m9gd-instances-powered-by-new-aws-graviton5-processors/",
+          "key_insights": [
+            "AWS launches Amazon EC2 M9g and M9gd instances powered by new AWS Graviton5 processors.",
+            "These new processors offer up to 25% better compute performance compared to Graviton4-based instances and are designed for energy efficiency."
+          ]
+        },
+        {
+          "title": "Amazon ECS introduces new high-resolution metrics for faster service auto scaling",
+          "url": "https://aws.amazon.com/blogs/aws/amazon-ecs-introduces-new-high-resolution-metrics-for-faster-service-auto-scaling/",
+          "key_insights": [
+            "Amazon Elastic Container Service (ECS) now provides high-resolution metrics for service auto scaling.",
+            "Enables predictive, scheduled, and target tracking scaling to dynamically adjust task counts based on workload demand."
+          ]
+        },
+        {
+          "title": "AI data centers just got a government-mandated fast lane to the grid",
+          "url": "https://techcrunch.com/2026/06/18/ai-data-centers-just-got-a-government-mandated-fast-lane-to-the-grid/",
+          "key_insights": [
+            "FERC has mandated fast lanes for interconnections between AI data centers and the electrical grid.",
+            "This decision, however, did not address underlying electricity supply shortages."
+          ]
+        },
+        {
+          "title": "AWS IoT Device SDK for Swift, and more (June 8, 2026)",
+          "url": "https://aws.amazon.com/blogs/aws/aws-weekly-roundup-byom-for-amazon-rds-for-sql-server-aws-iot-device-sdk-for-swift-and-more-june-8-2026/",
+          "key_insights": [
+            "The AWS IoT Device SDK for Swift reached general availability, providing production-ready MQTT 5 connectivity, Device Shadow, Jobs, and fleet provisioning.",
+            "The SDK, part of the Swift Server Workgroup (SSWG), supports macOS, iOS, tvOS, and Linux platforms to simplify IoT development."
+          ]
+        },
+        {
+          "title": "Ubiquiti: Enterprise NAS, Built on ZFS",
+          "url": "https://blog.ui.com/article/introducing-enterprise-nas/",
+          "key_insights": [
+            "Ubiquiti introduced a new enterprise Network-Attached Storage (NAS) device built on the ZFS file system.",
+            "ZFS provides a robust and fault-tolerant storage solution for large-scale enterprise deployments, offering high-performance data storage and management."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Software Engineering & Programming Languages",
+      "articles": [
+        {
+          "title": "Project Valhalla, Explained: How a Decade of Work Arrives in JDK 28",
+          "url": "https://www.jvm-weekly.com/p/project-valhalla-explained-how-a",
+          "key_insights": [
+            "Project Valhalla, a decade-long effort, converges in JDK 28 as a preview feature, aiming to improve Java performance and reduce latency.",
+            "Focuses on Ahead-of-Time (AOT) and Just-in-Time (JIT) compilation to make Java more suitable for real-time systems by reducing pause times and enhancing multithreading."
+          ]
+        },
+        {
+          "title": "Ten years of ClickHouse in open source",
+          "url": "https://clickhouse.com/blog/open-source-10",
+          "key_insights": [
+            "ClickHouse was first released as an open-source database management system in 2012.",
+            "The platform has been continuously developed by Yandex and is now widely adopted across finance, media, and technology industries."
+          ]
+        },
+        {
+          "title": "Modeloop – From visual algorithms to microcontroller C code",
+          "url": "https://www.modeloop.app/",
+          "key_insights": [
+            "Modeloop is a web-based tool enabling users to create visual algorithms for microcontrollers.",
+            "Supports various programming languages, including C and Python, aiming to simplify microcontroller application development and deployment."
+          ]
+        },
+        {
+          "title": "Datasette Apps: Host custom HTML applications inside Datasette",
+          "url": "https://simonwillison.net/2026/Jun/18/datasette-apps/",
+          "key_insights": [
+            "Datasette, an open-source database browser, now supports hosting custom HTML applications directly within the platform.",
+            "Developers can create and deploy web applications inside Datasette, expanding its functionality."
+          ]
+        },
+        {
+          "title": "Zero-Touch OAuth for MCP",
+          "url": "https://blog.modelcontextprotocol.io/posts/enterprise-managed-auth/",
+          "key_insights": [
+            "The ModelContext Protocol (MCP) introduces Zero-touch OAuth, a new feature enabling seamless and automated authentication.",
+            "Aims to simplify managing access permissions for enterprise applications based on this secure authentication standard."
+          ]
+        },
+        {
+          "title": "Announcing TypeScript 7.0 RC",
+          "url": "https://www.reddit.com/r/programming/comments/1ubn4uj/ocaml_550_released/",
+          "key_insights": [
+            "TypeScript 7.0 Release Candidate (RC) is now available, marking a new milestone in the language's development."
+          ]
+        },
+        {
+          "title": "Efficient C++ Programming for Modern C++ CPUs, Chapter 4/part 2",
+          "url": "https://www.reddit.com/r/programming/comments/1ubn4uj/ocaml_550_released/",
+          "key_insights": [
+            "The second installment of 'Efficient C++ Programming for Modern 64-bit CPUs' covers CPU Physics and CPU Cycles.",
+            "Provides visualizations and data on operation costs in CPU clock cycles to help optimize code for modern CPUs."
+          ]
+        },
+        {
+          "title": "How to Deadlock a Java ExecutorService",
+          "url": "https://www.reddit.com/r/programming/comments/1u9wq7z/how_to_deadlock_a_java_executorservice/",
+          "key_insights": [
+            "The article demonstrates how to intentionally deadlock a Java ExecutorService.",
+            "Highlights the importance of careful synchronization when using `ExecutorService.submit()` and `Future.get()` with threads in Java."
+          ]
+        },
+        {
+          "title": "What's New in Postgres 19: Beta Release Deep Dive",
+          "url": "https://www.reddit.com/r/programming/comments/1u9aktp/whats_new_in_postgres_19_beta_release_deep_dive/",
+          "key_insights": [
+            "Postgres 19 beta release includes new features like improved JSON support and enhanced online backups.",
+            "Emphasizes the importance of careful planning for migration to new Postgres versions."
+          ]
+        },
+        {
+          "title": "How Modern Indexing works in PostgreSQL- In depth explanation of how Indexing in PostgreSQL works and what enahncements Postgres has adapted that makes Indexing more faster.",
+          "url": "https://www.reddit.com/r/programming/comments/1u9adv5/how_modern_indexing_works_in_postgresql_in_depth/",
+          "key_insights": [
+            "PostgreSQL uses B-Tree structures in memory for indexing and OS system calls like io_uring to enhance synchronous I/O reading.",
+            "It maintains a file structure with line pointers (TIDs) and applies binary search on leaf pages for efficient record retrieval."
+          ]
+        },
+        {
+          "title": "OpenAI joins The Rust Foundation as a Platinum member and donates funds to support Rust maintenance",
+          "url": "https://www.reddit.com/r/programming/comments/1u8kqxx/openai_joins_the_rust_foundation_as_a_platinun/",
+          "key_insights": [
+            "OpenAI has joined the Rust Foundation as a Platinum member.",
+            "The organization is providing donations to support the maintenance and development of the Rust programming language."
+          ]
+        },
+        {
+          "title": "OCaml 5.5.0 released",
+          "url": "https://www.reddit.com/r/programming/comments/1ubn4uj/ocaml_550_released/",
+          "key_insights": [
+            "OCaml version 5.5.0, a programming language and compiler, has been officially released."
+          ]
+        },
+        {
+          "title": "epoll vs io_uring in Linux",
+          "url": "https://www.reddit.com/r/programming/comments/1ubsndj/epoll_vs_io_uring_in_linux/",
+          "key_insights": [
+            "Compares epoll (kernel-level, callback-based) and io_uring (modern, buffer-based) for Linux I/O operations.",
+            "io_uring offers superior performance and scalability for high-performance applications compared to epoll."
+          ]
+        },
+        {
+          "title": "Burnout Is Real for Open Source Maintainers: A Conversation with John-David Dalton, Creator of Lodash",
+          "url": "https://www.reddit.com/r/programming/comments/1uaodhr/burnout_is_real_for_open_source_maintainers_a/",
+          "key_insights": [
+            "Burnout is a common issue for open source maintainers, especially for popular libraries like Lodash.",
+            "John-David Dalton, Lodash's creator, discussed how burnout impacts productivity and motivation in maintaining open source projects."
+          ]
+        },
+        {
+          "title": "Old Software Was Fast Because It Had No Choice",
+          "url": "https://www.reddit.com/r/programming/comments/1ua2lxq/old_software_was_fast_because_it_had_no_choice/",
+          "key_insights": [
+            "Early software achieved speed due to constraints like limited memory and processing power.",
+            "Modern software's perceived slowness can be attributed to increased complexity, inefficient algorithms, or advanced technologies like virtualization."
+          ]
+        },
+        {
+          "title": "A Practical Guide to SSH Tunnels: Local and Remote Port Forwarding",
+          "url": "https://www.reddit.com/r/programming/comments/1ua96l5/a_practical_guide_to_ssh_tunnels_local_and_remote/",
+          "key_insights": [
+            "The guide explains SSH tunnels for local port forwarding, allowing access to remote services as if local.",
+            "Covers establishing connections, specifying ports, and common use cases like accessing web servers or databases remotely."
+          ]
+        },
+        {
+          "title": "Build a Bytecode VM (in Sema)",
+          "url": "https://www.reddit.com/r/programming/comments/1uazs9j/build_a_bytecode_vm_in_sema/",
+          "key_insights": [
+            "Provides a step-by-step guide to building a bytecode virtual machine (VM) using the Sema programming language.",
+            "Covers defining instruction sets, creating a parser, and implementing a memory manager for educational purposes."
+          ]
+        },
+        {
+          "title": "Apple unifies device and simulator management in devicectl, here's what it means for iOS test automation and CI/CD",
+          "url": "https://www.reddit.com/r/programming/comments/1ua8f9k/apple_unifies_device_and_simulator_management_in/",
+          "key_insights": [
+            "Apple's new devicectl tool unifies device and simulator management for iOS, impacting test automation and CI/CD workflows.",
+            "This change promises reduced complexity and increased efficiency for iOS development processes."
+          ]
+        },
+        {
+          "title": "The story of Pybinding - a python wrapper around C++...",
+          "url": "https://www.reddit.com/r/programming/comments/1uataxc/the_story_of_pybinding_a_python_wrapper_around_c/",
+          "key_insights": [
+            "Pybinding is a Python wrapper enabling calls to C++ code from within Python applications.",
+            "It addresses the need for raw computational speed in Python without sacrificing development speed and ecosystem benefits."
+          ]
+        },
+        {
+          "title": "Code duplication is far cheaper than the wrong abstraction",
+          "url": "https://sandimetz.com/blog/2016/1/20/the-wrong-abstraction",
+          "key_insights": [
+            "The author argues that code duplication can be more cost-effective than creating overly complex abstractions.",
+            "Duplicated code is often easier to review and refactor compared to intricate, abstracted logic."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Security & Systems Architecture",
+      "articles": [
+        {
+          "title": "I found 10k GitHub repositories distributing Trojan malware",
+          "url": "https://orchidfiles.com/github-repositories-distributing-malware/",
+          "key_insights": [
+            "An author discovered 10,000 GitHub repositories actively spreading Trojan malware.",
+            "This finding underscores the critical importance of cybersecurity awareness and responsible development practices."
+          ]
+        },
+        {
+          "title": "Who Owns Your ATProto Identity? Hint: It's Probably Not You",
+          "url": "https://kevinak.se/blog/who-actually-owns-your-atproto-identity-hint-its-probably-not-you",
+          "key_insights": [
+            "The article discusses users' limited control over their ATProto identities, highlighting unclear ownership and governance.",
+            "Suggests users should be aware of potential lack of control over their decentralized identities."
+          ]
+        },
+        {
+          "title": "System call instrumentation on Linux/x86‑64 using memory‑indirect calls, part I",
+          "url": "https://www.humprog.org/~stephen/blog/2026/06/15/#system-call-instrumentation-on-intel-negative-result",
+          "key_insights": [
+            "Describes a method for instrumenting system calls on Linux/x86-64 using memory-indirect calls.",
+            "This approach monitors system call behavior and improves security by using indirect memory accesses to record invocations."
+          ]
+        },
+        {
+          "title": "Loupe – A iOS app that raises awareness about what native apps can see",
+          "url": "https://github.com/mysk-research/loupe",
+          "key_insights": [
+            "Loupe is an iOS app designed to demonstrate and visualize the data native apps can access on mobile devices.",
+            "Raises user awareness about potential privacy risks associated with native app behavior."
+          ]
+        },
+        {
+          "title": "The US says ASML’s top chip tool may be in China. ASML says it isn’t",
+          "url": "https://techcrunch.com/2026/06/19/the-us-says-asmls-top-chip-tool-may-be-in-china-asml-says-it-isnt/",
+          "key_insights": [
+            "The US government expresses concern over the potential export of ASML's top chip tool (NXE:3300B) to China.",
+            "ASML denies its top tool is being used in China, citing commercial logic against risking its export license."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Hardware & Research",
+      "articles": [
+        {
+          "title": "To study how chips work, MIT researchers built their own operating system",
+          "url": "https://news.mit.edu/2026/to-study-how-chips-really-work-mit-researchers-built-their-own-operating-system-0610",
+          "key_insights": [
+            "Researchers at MIT developed a custom operating system specifically for studying the fundamental workings of computer chips."
+          ]
+        },
+        {
+          "title": "DuckDB Internals: Why Is DuckDB Fast? (Part 1)",
+          "url": "https://www.greybeam.ai/blog/duckdb-internals-part-1",
+          "key_insights": [
+            "The blog post provides an internal explanation detailing the architectural and design choices contributing to DuckDB's high performance."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Industry Trends & Productivity",
+      "articles": [
+        {
+          "title": "TechCrunch Mobility: A new robotaxi scorecard shows China’s dominance",
+          "url": "https://techcrunch.com/2026/06/21/techcrunch-mobility-a-new-robotaxi-scorecard-shows-chinas-dominance/",
+          "key_insights": [
+            "A new scoring system evaluates global robotaxi competitiveness, indicating China's dominance.",
+            "Chinese companies like Didi and NIO are noted for their significant market share in the robotaxi industry."
+          ]
+        },
+        {
+          "title": "He made your free video player run smoothly. Now he’s doing that for robots.",
+          "url": "https://techcrunch.com/2026/06/19/he-made-your-free-video-player-run-smoothly-now-hes-doing-that-for-robots/",
+          "key_insights": [
+            "Jean-Baptiste Kempf, known for smooth video playback, has developed Kyber.",
+            "Kyber is an open-source infrastructure layer designed for real-time control of remote devices, including robots."
+          ]
+        },
+        {
+          "title": "Mivo’s new app takes a mindful approach to managing screen time",
+          "url": "https://techcrunch.com/2026/06/18/mivos-new-app-takes-a-mindful-approach-to-managing-screen-time/",
+          "key_insights": [
+            "Mivo's new app encourages users to become more aware of their screen time, empowering them to decide on continued device use.",
+            "Unlike other screen time apps, Mivo focuses on mindful engagement rather than forceful disengagement."
+          ]
+        },
+        {
+          "title": "Aura’s impressive e-ink photo frame doesn’t even look digital",
+          "url": "https://techcrunch.com/2026/06/19/auras-impressive-e-ink-photo-frame-doesn%E2%80%99t-even-look-digital/",
+          "key_insights": [
+            "Aura's e-ink photo frames offer a non-digital aesthetic with the ability to upload photos from phones, web, email, iCloud, and Google Photos via a mobile app."
+          ]
+        }
+      ]
+    }
+  ]
+}

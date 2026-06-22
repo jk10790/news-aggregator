@@ -23,7 +23,7 @@ async def main():
     consumer = AIOKafkaConsumer(
         TOPIC_VERIFIED_ARTICLES,
         bootstrap_servers=REDPANDA_BROKER,
-        group_id="storage-group",
+        group_id="storage-group-v2",
         auto_offset_reset="earliest",
         enable_auto_commit=True
     )

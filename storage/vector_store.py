@@ -1,3 +1,5 @@
+import datetime
+import email.utils
 import hashlib
 import logging
 import os
@@ -35,6 +37,41 @@ def get_or_create_collection():
 def generate_url_hash(url: str) -> str:
     """Generates a short MD5 hash of the URL to act as a deterministic primary key."""
     return hashlib.md5(url.encode("utf-8")).hexdigest()
+
+def parse_date_to_int(date_str: str) -> int:
+    """
+    Parses various date string formats (RFC 2822, ISO 8601, YYYY-MM-DD) into a YYYYMMDD integer.
+    Defaults to today's date if parsing fails.
+    """
+    if not date_str or date_str == "Unknown Date":
+        return int(datetime.date.today().strftime("%Y%m%d"))
+    
+    # 1. Try RFC 2822 format (common in RSS feeds, e.g. "Wed, 17 Jun 2026 15:09:20 +0000")
+    try:
+        dt = email.utils.parsedate_to_datetime(date_str)
+        return int(dt.strftime("%Y%m%d"))
+    except Exception:
+        pass
+        
+    # 2. Try ISO 8601 / RFC 3339 format (e.g. "2026-06-21T20:30:56Z")
+    try:
+        clean_str = date_str.replace("Z", "+00:00")
+        dt = datetime.datetime.fromisoformat(clean_str)
+        return int(dt.strftime("%Y%m%d"))
+    except Exception:
+        pass
+        
+    # 3. Fallback: try scanning for YYYY-MM-DD pattern
+    try:
+        match = re.search(r"(\d{4})-(\d{2})-(\d{2})", date_str)
+        if match:
+            return int("".join(match.groups()))
+    except Exception:
+        pass
+
+    # Safe fallback to today
+    logger.warning(f"Could not parse date string '{date_str}'. Falling back to today's date.")
+    return int(datetime.date.today().strftime("%Y%m%d"))
 
 def chunk_text(text: str) -> list[str]:
     """
@@ -74,10 +111,13 @@ def store_article(article: ArticleVerified):
     url = article.link
     parent_id = f"parent_{generate_url_hash(url)}"
     
+    # Parse human date to integer YYYYMMDD
+    published_int = parse_date_to_int(article.published)
+    
     # 1. Store the Parent Document (Title + Summary) without embeddings
     parent_text = f"Title: {article.title}\nSummary: {article.summary}"
     
-    logger.info(f"Storing Parent Document: {parent_id} | '{article.title}'")
+    logger.info(f"Storing Parent Document: {parent_id} | '{article.title}' | DateInt: {published_int}")
     collection.add(
         ids=[parent_id],
         documents=[parent_text],
@@ -87,6 +127,7 @@ def store_article(article: ArticleVerified):
             "url": url,
             "source": article.source,
             "published": article.published,
+            "published_int": published_int,
             "triage_reason": article.triage_reason
         }]
     )
@@ -111,7 +152,9 @@ def store_article(article: ArticleVerified):
             "type": "child",
             "parent_id": parent_id,
             "source": article.source,
-            "url": url
+            "url": url,
+            "published": article.published,
+            "published_int": published_int  # Propagate numeric date
         })
         
     collection.add(
@@ -121,3 +164,4 @@ def store_article(article: ArticleVerified):
         metadatas=child_metadatas
     )
     logger.info(f"Successfully indexed parent {parent_id} and {len(child_ids)} child chunks.")
+

@@ -54,4 +54,21 @@ services:
       - IS_PERSISTENT=TRUE
       - PERSIST_DIRECTORY=/chroma/chroma
     ports:
+      - "8002:8000"
+
+  # =========================================================================
+  # Taut: AI Efficiency Middleware Proxy
+  # =========================================================================
+  taut:
+    image: python:3.11-slim
+    container_name: taut
+    volumes:
+      - ../taut:/taut
+    command: bash -c "pip install --upgrade pip && pip install '/taut[cache,proxy]' && python -m taut.proxy.server --port 8000"
+    ports:
       - "8000:8000"
+    environment:
+      - TAUT_PROXY_HOST=0.0.0.0
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OLLAMA_API_BASE=http://host.docker.internal:11434
+      - TAUT_ROUTING_TIERS={"simple":["ollama/${OLLAMA_MODEL:-llama3}"],"standard":["gemini/${GEMINI_MODEL:-gemini-2.5-flash}"],"complex":["gemini/${GEMINI_MODEL:-gemini-2.5-flash}"]}

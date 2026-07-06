@@ -1,0 +1,4 @@
+### ARTICLE TO TRIAGE:
+Title: {title}
+Source: {source}
+Summary: {summary}

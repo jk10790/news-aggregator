@@ -51,13 +51,6 @@ Output:
 
 ---
 
-### ARTICLE TO TRIAGE:
-Title: {title}
-Source: {source}
-Summary: {summary}
-
----
-
 ### RESPONSE FORMAT (STRICT JSON ONLY):
 {{
   "relevant": true,

@@ -3,10 +3,7 @@ import json
 import logging
 import os
 import sys
-from google import genai
-from google.genai import types
-import ollama
-from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from openai import AsyncOpenAI
 
 # Dynamic path resolution to import config from parent directory (project root)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,74 +11,57 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     LLM_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_HOST, OLLAMA_MODEL,
     REDPANDA_BROKER, TOPIC_RAW_ARTICLES, TOPIC_VERIFIED_ARTICLES,
-    USER_INTERESTS, RATE_DELAY_SECONDS, BACKOFF_BASE_SECONDS, MAX_RETRIES
+    USER_INTERESTS, RATE_DELAY_SECONDS, BACKOFF_BASE_SECONDS, MAX_RETRIES, TAUT_URL
 )
 from models import ArticleRaw, ArticleVerified
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Load the triage prompt template from the isolated text file
-PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "triage_prompt.txt")
+# Load the triage prompt templates from the isolated text files
+SYSTEM_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "triage_system_prompt.txt")
+USER_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "triage_user_prompt.txt")
 try:
-    with open(PROMPT_PATH, "r") as f:
-        TRIAGE_PROMPT_TEMPLATE = f.read()
+    with open(SYSTEM_PROMPT_PATH, "r") as f:
+        TRIAGE_SYSTEM_PROMPT = f.read()
+    with open(USER_PROMPT_PATH, "r") as f:
+        TRIAGE_USER_PROMPT = f.read()
 except FileNotFoundError:
-    logger.error(f"Prompt file not found at {PROMPT_PATH}. Exiting.")
+    logger.error(f"Prompt files not found. Exiting.")
     exit(1)
 
-# Initialize LLM Clients
-gemini_client = None
-if LLM_PROVIDER == "gemini":
-    if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY is empty in .env. Falling back to default or Ollama if configured.")
-    # Initialize the new Google GenAI SDK Client
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-elif LLM_PROVIDER == "ollama":
-    logger.info(f"Ollama provider active. Connecting to host: {OLLAMA_HOST}")
-    # Async client for Ollama
-    ollama_client = ollama.AsyncClient(host=OLLAMA_HOST)
+# Initialize LLM Client pointing to Taut Proxy
+taut_client = AsyncOpenAI(base_url=TAUT_URL, api_key="placeholder")
 
 async def query_llm_triage(title: str, source: str, summary: str) -> dict:
     """
-    Sends the article to the configured LLM provider and returns the parsed JSON decision.
+    Sends the article to the configured LLM provider via Taut proxy and returns the parsed JSON decision.
     Implements basic retries for robustness.
     """
-    prompt = TRIAGE_PROMPT_TEMPLATE.format(
-        user_interests=USER_INTERESTS,
+    system_prompt = TRIAGE_SYSTEM_PROMPT.format(
+        user_interests=USER_INTERESTS
+    )
+    user_prompt = TRIAGE_USER_PROMPT.format(
         title=title,
         source=source,
         summary=summary
     )
     
+    model_name = f"gemini/{GEMINI_MODEL}" if LLM_PROVIDER == "gemini" else f"ollama/{OLLAMA_MODEL}"
+    
     for attempt in range(MAX_RETRIES):
         try:
-            if LLM_PROVIDER == "gemini":
-                # We run this in an executor or use the async client. For now, since the 
-                # new SDK supports direct generation, we will fetch it.
-                # Use GEMINI_MODEL for high-speed triage.
-                response = gemini_client.models.generate_content(
-                    model=GEMINI_MODEL,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                    ),
-                )
-                # Parse response text
-                return json.loads(response.text)
-                
-            elif LLM_PROVIDER == "ollama":
-                # Async call to local Ollama
-                response = await ollama_client.generate(
-                    model=OLLAMA_MODEL,
-                    prompt=prompt,
-                    format="json"  # Forces JSON schema response
-                )
-                return json.loads(response["response"])
-            
-            else:
-                raise ValueError(f"Unsupported LLM provider: {LLM_PROVIDER}")
+            response = await taut_client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                response_format={"type": "json_object"}
+            )
+            return json.loads(response.choices[0].message.content)
                 
         except Exception as e:
             delay = BACKOFF_BASE_SECONDS * (2 ** attempt)  # Exponential backoff

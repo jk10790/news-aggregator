@@ -54,7 +54,8 @@ else:
 
 REDPANDA_BROKER = os.getenv("REDPANDA_BROKER", "localhost:9092")
 CHROMA_SERVER_HOST = os.getenv("CHROMA_SERVER_HOST", "localhost")
-CHROMA_SERVER_PORT = os.getenv("CHROMA_SERVER_PORT", "8000")
+CHROMA_SERVER_PORT = os.getenv("CHROMA_SERVER_PORT", "8002")
+TAUT_URL = os.getenv("TAUT_URL", "http://localhost:8000/v1")
 
 # Kafka/Redpanda Topics we will use
 TOPIC_RAW_ARTICLES = "raw-articles"

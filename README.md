@@ -12,7 +12,8 @@ This architecture runs locally inside a Docker Compose cluster.
 | :--- | :--- | :--- | :--- |
 | **Redpanda** | `9092` / `29092` | `localhost:9092` | Kafka-compatible event stream broker buffering data flows. |
 | **Redpanda Console** | `8080` | [http://localhost:8080](http://localhost:8080) | Web-based GUI to inspect topics, offsets, and payloads. |
-| **ChromaDB** | `8000` | [http://localhost:8000](http://localhost:8000) | Vector database storing semantic text embeddings and parent-child metadata. |
+| **ChromaDB** | `8002` | [http://localhost:8002](http://localhost:8002) | Vector database storing semantic text embeddings and parent-child metadata. |
+| **Taut Proxy** | `8000` | [http://localhost:8000](http://localhost:8000) | AI Efficiency Middleware intercepting, caching, and routing LLM requests. |
 | **Ollama** | `11434` | [http://localhost:11434](http://localhost:11434) | Local runtime hosting offline LLM models (e.g., Llama-3). |
 | **FastAPI Server** | `8050` | [http://localhost:8050](http://localhost:8050) | The API gateway serving RAG queries and pre-compiled briefs. |
 

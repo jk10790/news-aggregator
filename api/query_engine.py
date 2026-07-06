@@ -5,18 +5,17 @@ import os
 import sys
 from typing import Optional
 from pydantic import BaseModel, Field
+from openai import AsyncOpenAI
+import json
 
 # Dynamic path resolution to import from parent directory (project root)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from google import genai
-from google.genai import types
-import ollama
 import chromadb
 from sentence_transformers import SentenceTransformer
 from config import (
     LLM_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_HOST, OLLAMA_MODEL,
-    CHROMA_SERVER_HOST, CHROMA_SERVER_PORT
+    CHROMA_SERVER_HOST, CHROMA_SERVER_PORT, TAUT_URL
 )
 
 # Setup logging
@@ -36,11 +35,8 @@ except FileNotFoundError:
 logger.info("Initializing local SentenceTransformer for query embedding...")
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Initialize LLM Clients
-gemini_client = None
-if GEMINI_API_KEY:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-ollama_client = ollama.AsyncClient(host=OLLAMA_HOST)
+# Initialize LLM Client pointing to Taut Proxy
+taut_client = AsyncOpenAI(base_url=TAUT_URL, api_key="placeholder")
 
 # Connect to ChromaDB database service
 logger.info(f"Connecting to ChromaDB at {CHROMA_SERVER_HOST}:{CHROMA_SERVER_PORT}...")
@@ -81,26 +77,13 @@ Respond strictly in JSON matching the required schema.
 "{user_query}"
 """
     try:
-        if GEMINI_API_KEY:
-            # High-reasoning structured translation via Gemini
-            response = await asyncio.to_thread(
-                gemini_client.models.generate_content,
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=TranslatedQuery
-                )
-            )
-            return TranslatedQuery.model_validate_json(response.text)
-        else:
-            # Fallback to Ollama JSON mode
-            response = await ollama_client.generate(
-                model=OLLAMA_MODEL,
-                prompt=prompt,
-                format="json"
-            )
-            return TranslatedQuery.model_validate_json(response["response"])
+        model_name = f"gemini/{GEMINI_MODEL}" if GEMINI_API_KEY else f"ollama/{OLLAMA_MODEL}"
+        response = await taut_client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
+        )
+        return TranslatedQuery.model_validate_json(response.choices[0].message.content)
     except Exception as e:
         logger.warning(f"Query translation failed: {str(e)}. Defaulting to full database search.")
         return TranslatedQuery(semantic_query=user_query, days_offset_start=None, days_offset_end=None)
@@ -181,12 +164,12 @@ async def execute_hybrid_search(translated: TranslatedQuery) -> list[dict]:
 # =========================================================================
 # 4. RAG Execution Loop
 # =========================================================================
-async def query_news_rag(user_query: str) -> str:
+async def query_news_rag(user_query: str, user_phone_number: str = "default_user") -> str:
     """
     RAG coordinator:
     1. Translates the query.
     2. Executes hybrid retrieval.
-    3. Triggers grounded LLM generation.
+    3. Triggers grounded LLM generation via Taut (with Semantic Caching isolated by phone number).
     """
     # 1. Translate Query
     translated = await translate_query(user_query)
@@ -208,23 +191,16 @@ async def query_news_rag(user_query: str) -> str:
         query=user_query
     )
     
-    # 5. Query LLM to generate answer
+    # 5. Query LLM to generate answer via Taut proxy with multi-tenant caching
     try:
-        if GEMINI_API_KEY:
-            # We use Gemini for conversation since it has higher reasoning & citation adherence
-            response = await asyncio.to_thread(
-                gemini_client.models.generate_content,
-                model=GEMINI_MODEL,
-                contents=prompt
-            )
-            return response.text
-        else:
-            # Fallback to local Ollama
-            response = await ollama_client.generate(
-                model=OLLAMA_MODEL,
-                prompt=prompt
-            )
-            return response["response"]
+        model_name = f"gemini/{GEMINI_MODEL}" if GEMINI_API_KEY else f"ollama/{OLLAMA_MODEL}"
+        response = await taut_client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            extra_headers={"X-Taut-Namespace": user_phone_number}
+        )
+        return response.choices[0].message.content
     except Exception as e:
         logger.error(f"RAG query generation failed: {str(e)}")
         return "Error: Failed to generate response from LLM."
+

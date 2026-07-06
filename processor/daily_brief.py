@@ -9,9 +9,7 @@ from pydantic import BaseModel, Field
 # Dynamic path resolution to import from parent directory (project root)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from google import genai
-from google.genai import types
-import ollama
+import taut
 import chromadb
 from config import (
     LLM_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_HOST, OLLAMA_MODEL,
@@ -56,86 +54,62 @@ except FileNotFoundError as e:
     exit(1)
 
 # =========================================================================
-# 3. Hybrid Client Initialization
+# 3. Hybrid Client Initialization via Taut SDK
 # =========================================================================
-# We initialize BOTH clients if configuration settings exist.
-gemini_client = None
-if GEMINI_API_KEY:
-    logger.info("Initializing cloud Gemini Client for high-reasoning tasks...")
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+logger.info("Initializing Taut SDK Pipeline for Map-Reduce workers...")
+# We use LiteLLM strings for Taut models
+gemini_model_str = f"gemini/{GEMINI_MODEL}" if GEMINI_API_KEY else None
+ollama_model_str = f"ollama/{OLLAMA_MODEL}"
 
-logger.info(f"Initializing local Ollama Client at {OLLAMA_HOST} for high-volume tasks...")
-ollama_client = ollama.AsyncClient(host=OLLAMA_HOST)
+# Initialize taut config directly to get native Prefix Alignment (Layer 4)
+taut_config = taut.TautConfig(
+    provider="litellm",
+    num_retries=MAX_RETRIES,
+    timeout=60.0,
+    fallback_models=[ollama_model_str], # fallback to local
+    routing=taut.TieredRoutingConfig(),
+    compression=taut.CompressionConfig(json=True, code=False)
+)
+pipeline = taut.create_pipeline(taut_config)
 
-# Dynamic task routing:
-# We execute Map tasks locally (Ollama) to avoid cloud rate limits.
-# We execute the single Reduce task on Gemini (if key is present) for schema enforcement.
-MAP_LLM_PROVIDER = "ollama"
-REDUCE_LLM_PROVIDER = "gemini" if GEMINI_API_KEY else "ollama"
+MAP_LLM_PROVIDER = ollama_model_str
+REDUCE_LLM_PROVIDER = gemini_model_str if GEMINI_API_KEY else ollama_model_str
 
-logger.info(f"Hybrid Task Routing Active: Map={MAP_LLM_PROVIDER.upper()} | Reduce={REDUCE_LLM_PROVIDER.upper()}")
+logger.info(f"Hybrid Task Routing Active: Map={MAP_LLM_PROVIDER} | Reduce={REDUCE_LLM_PROVIDER}")
 
 # =========================================================================
 # 4. LLM Wrapper Functions
 # =========================================================================
 async def query_llm_map(articles_text: str) -> str:
-    """Queries the configured Map LLM provider to extract bullet points from a batch."""
-    prompt = MAP_PROMPT_TEMPLATE.format(articles_text=articles_text)
+    """Queries the configured Map LLM provider via Taut (with Prefix Alignment)."""
+    # Use PromptBlocks to maximize KV caching on the map template
+    request = taut.LLMRequest(
+        blocks=[
+            taut.SystemBlock(content="You are a data extraction assistant."),
+            taut.ContextBlock(content=MAP_PROMPT_TEMPLATE),
+            taut.QueryBlock(content=f"Extract bullet points for the following batch:\n{articles_text}")
+        ],
+        model=MAP_LLM_PROVIDER
+    )
     
-    for attempt in range(MAX_RETRIES):
-        try:
-            if MAP_LLM_PROVIDER == "gemini":
-                response = await asyncio.to_thread(
-                    gemini_client.models.generate_content,
-                    model=GEMINI_MODEL,
-                    contents=prompt
-                )
-                return response.text
-            elif MAP_LLM_PROVIDER == "ollama":
-                response = await ollama_client.generate(
-                    model=OLLAMA_MODEL,
-                    prompt=prompt
-                )
-                return response["response"]
-        except Exception as e:
-            delay = BACKOFF_BASE_SECONDS * (2 ** attempt)
-            logger.warning(f"Map step failed: {str(e)}. Retrying in {delay}s...")
-            await asyncio.sleep(delay)
-            
-    return "Error: Map step failed after multiple attempts."
+    response = await pipeline.run(request)
+    return response.content
 
 async def query_llm_reduce(map_summaries: str) -> str:
-    """Queries the configured Reduce LLM provider and enforces the DailyBrief JSON schema."""
-    prompt = REDUCE_PROMPT_TEMPLATE.format(map_summaries=map_summaries)
+    """Queries the configured Reduce LLM provider via Taut and enforces JSON format."""
+    request = taut.LLMRequest(
+        blocks=[
+            taut.SystemBlock(content="You are a news compiler assistant. You MUST output strictly in JSON matching the schema."),
+            taut.ContextBlock(content=REDUCE_PROMPT_TEMPLATE),
+            taut.QueryBlock(content=f"Compile these summaries:\n{map_summaries}")
+        ],
+        model=REDUCE_LLM_PROVIDER,
+        # Force JSON response output. Taut handles the format translation down to litellm.
+        response_format={"type": "json_object"}
+    )
     
-    for attempt in range(MAX_RETRIES):
-        try:
-            if REDUCE_LLM_PROVIDER == "gemini":
-                # Cloud Gemini with strict schema enforcement
-                response = await asyncio.to_thread(
-                    gemini_client.models.generate_content,
-                    model=GEMINI_MODEL,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=DailyBrief
-                    )
-                )
-                return response.text
-            elif REDUCE_LLM_PROVIDER == "ollama":
-                # Local Ollama JSON mode
-                response = await ollama_client.generate(
-                    model=OLLAMA_MODEL,
-                    prompt=prompt,
-                    format="json"
-                )
-                return response["response"]
-        except Exception as e:
-            delay = BACKOFF_BASE_SECONDS * (2 ** attempt)
-            logger.warning(f"Reduce step failed: {str(e)}. Retrying in {delay}s...")
-            await asyncio.sleep(delay)
-            
-    raise RuntimeError("Reduce step failed after multiple attempts.")
+    response = await pipeline.run(request)
+    return response.content
 
 # =========================================================================
 # 5. Main Batch Runner

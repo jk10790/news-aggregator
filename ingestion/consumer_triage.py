@@ -15,6 +15,20 @@ from config import (
 )
 from models import ArticleRaw, ArticleVerified
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+import taut
+import xml.etree.ElementTree as ET
+
+def xml_to_json_compressor(payload: str) -> str:
+    """Layer 3 Taut Plugin: Compresses heavy XML payloads into lightweight JSON strings."""
+    try:
+        root = ET.fromstring(payload)
+        # A basic generic XML to dict parser
+        data = {child.tag: child.text for child in root}
+        return json.dumps(data)
+    except Exception:
+        return payload
+
+taut.register_compressor(mime_type="application/xml", func=xml_to_json_compressor)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

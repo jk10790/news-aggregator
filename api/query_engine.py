@@ -3,10 +3,11 @@ import datetime
 import logging
 import os
 import sys
-from typing import Optional
+from typing import Optional, List, TypedDict
 from pydantic import BaseModel, Field
 from openai import AsyncOpenAI
 import json
+from langgraph.graph import StateGraph, END
 
 # Dynamic path resolution to import from parent directory (project root)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,39 +44,26 @@ logger.info(f"Connecting to ChromaDB at {CHROMA_SERVER_HOST}:{CHROMA_SERVER_PORT
 chroma_client = chromadb.HttpClient(host=CHROMA_SERVER_HOST, port=int(CHROMA_SERVER_PORT))
 collection = chroma_client.get_collection("news_archive")
 
-# =========================================================================
-# 1. Define Query Translation Schema
-# =========================================================================
 class TranslatedQuery(BaseModel):
-    semantic_query: str = Field(description="Core search terms stripped of time-related words (e.g. 'ClickHouse scalability')")
-    days_offset_start: Optional[int] = Field(default=None, description="Days ago start bounds. Today is 0, yesterday is 1, last week is 7. If no time bounding is requested or implied, set to null.")
-    days_offset_end: Optional[int] = Field(default=None, description="Days ago end bounds. Today is 0, yesterday is 1, last week is 7. If no time bounding is requested or implied, set to null.")
+    semantic_query: str = Field(description="Core search terms stripped of time-related words")
+    days_offset_start: Optional[int] = Field(default=None)
+    days_offset_end: Optional[int] = Field(default=None)
 
-# =========================================================================
-# 2. Query Translation Logic
-# =========================================================================
+class GraphState(TypedDict):
+    query: str
+    phone_number: str
+    interests: List[str]
+    semantic_query: str
+    context_articles: List[dict]
+    context_text: str
+    answer: str
+    retries: int
+    intent: str
+    grade: str
+
 async def translate_query(user_query: str) -> TranslatedQuery:
-    """
-    Uses the active LLM provider to translate relative time queries into structured offsets.
-    E.g. "What happened yesterday about AI?" -> semantic: "AI", start: 1, end: 1
-    """
     today_str = datetime.date.today().isoformat()
-    prompt = f"""
-You are a database query translation assistant. Your job is to parse relative date bounds from user questions and translate them into offset days relative to TODAY.
-
-TODAY'S DATE IS: {today_str}
-
-### TRANSLATION RULES:
-* If the user refers to "yesterday", set days_offset_start=1, days_offset_end=1.
-* If the user refers to "today" or "now", set days_offset_start=0, days_offset_end=0.
-* If the user refers to "last week" or "this week", set days_offset_start=7, days_offset_end=0.
-* If the user does not specify or imply any time bounding (e.g., "what is clickhouse", "tell me about local LLMs"), set days_offset_start=null and days_offset_end=null.
-
-Respond strictly in JSON matching the required schema.
-
-### USER QUERY:
-"{user_query}"
-"""
+    prompt = f"Translate query to date offsets for TODAY {today_str}. Query: '{user_query}'"
     try:
         model_name = f"gemini/{GEMINI_MODEL}" if GEMINI_API_KEY else f"ollama/{OLLAMA_MODEL}"
         response = await taut_client.chat.completions.create(
@@ -85,122 +73,154 @@ Respond strictly in JSON matching the required schema.
         )
         return TranslatedQuery.model_validate_json(response.choices[0].message.content)
     except Exception as e:
-        logger.warning(f"Query translation failed: {str(e)}. Defaulting to full database search.")
         return TranslatedQuery(semantic_query=user_query, days_offset_start=None, days_offset_end=None)
 
-# =========================================================================
-# 3. Hybrid Search Execution
-# =========================================================================
-async def execute_hybrid_search(translated: TranslatedQuery) -> list[dict]:
-    """
-    Executes a hybrid search query inside ChromaDB:
-    - Calculates absolute YYYYMMDD integer date limits if bounds are specified.
-    - Generates semantic vectors locally.
-    - Queries ChromaDB with optional metadata pre-filtering.
-    """
-    # 1. Generate query embedding locally on CPU
+async def execute_hybrid_search(translated: TranslatedQuery, interests: List[str]) -> list[dict]:
     query_vector = embedding_model.encode(translated.semantic_query).tolist()
     
-    # 2. Build ChromaDB pre-filtering constraints
+    # Pre-filtering constraints including user interests
+    and_clauses = [{"type": {"$eq": "child"}}]
+    
+    if interests:
+        # Filter by topics in user interests
+        # We assume the metadata contains a "topic" field
+        topic_clauses = [{"topic": {"$eq": interest}} for interest in interests]
+        if len(topic_clauses) > 1:
+            and_clauses.append({"$or": topic_clauses})
+        elif len(topic_clauses) == 1:
+            and_clauses.append(topic_clauses[0])
+
     if translated.days_offset_start is not None and translated.days_offset_end is not None:
         today = datetime.date.today()
         start_date_obj = today - datetime.timedelta(days=translated.days_offset_start)
         end_date_obj = today - datetime.timedelta(days=translated.days_offset_end)
+        and_clauses.append({"published_int": {"$gte": int(start_date_obj.strftime("%Y%m%d"))}})
+        and_clauses.append({"published_int": {"$lte": int(end_date_obj.strftime("%Y%m%d"))}})
         
-        start_date_int = int(start_date_obj.strftime("%Y%m%d"))
-        end_date_int = int(end_date_obj.strftime("%Y%m%d"))
-        
-        logger.info(f"Hybrid Search Bounds: Start={start_date_int} | End={end_date_int} | Query='{translated.semantic_query}'")
-        
-        where_filter = {
-            "$and": [
-                {"type": {"$eq": "child"}},
-                {"published_int": {"$gte": start_date_int}},
-                {"published_int": {"$lte": end_date_int}}
-            ]
-        }
-    else:
-        logger.info(f"Hybrid Search without date filter. Query='{translated.semantic_query}'")
-        where_filter = {
-            "type": {"$eq": "child"}
-        }
-    
-    # Query ChromaDB (retrieve top 8 child chunks)
+    where_filter = {"$and": and_clauses} if len(and_clauses) > 1 else and_clauses[0]
+
     results = collection.query(
         query_embeddings=[query_vector],
         n_results=8,
         where=where_filter
     )
-
     
-    # 3. Resolve Parent Context
-    # Querying child chunks gives us high semantic precision. Now, we resolve their parent IDs
-    # to feed the full text context to the LLM.
     context_articles = []
     seen_parents = set()
-    
     metadatas = results.get("metadatas", [[]])[0]
     
     for meta in metadatas:
         parent_id = meta.get("parent_id")
         if parent_id and parent_id not in seen_parents:
             seen_parents.add(parent_id)
-            
-            # Retrieve the full Parent Document from ChromaDB
             parent_result = collection.get(ids=[parent_id])
-            parent_docs = parent_result.get("documents", [])
-            parent_metas = parent_result.get("metadatas", [])
-            
-            if parent_docs:
+            if parent_result.get("documents"):
                 context_articles.append({
-                    "title": parent_metas[0].get("title", "No Title"),
-                    "source": parent_metas[0].get("source", "Unknown"),
-                    "url": parent_metas[0].get("url", ""),
-                    "content": parent_docs[0]
+                    "title": parent_result.get("metadatas", [{}])[0].get("title", "No Title"),
+                    "source": parent_result.get("metadatas", [{}])[0].get("source", "Unknown"),
+                    "url": parent_result.get("metadatas", [{}])[0].get("url", ""),
+                    "content": parent_result.get("documents", [""])[0]
                 })
-                
     return context_articles
 
-# =========================================================================
-# 4. RAG Execution Loop
-# =========================================================================
-async def query_news_rag(user_query: str, user_phone_number: str = "default_user") -> str:
-    """
-    RAG coordinator:
-    1. Translates the query.
-    2. Executes hybrid retrieval.
-    3. Triggers grounded LLM generation via Taut (with Semantic Caching isolated by phone number).
-    """
-    # 1. Translate Query
-    translated = await translate_query(user_query)
-    
-    # 2. Retrieve Parent Context
-    context_articles = await execute_hybrid_search(translated)
-    
-    if not context_articles:
-        return "I do not have this information in my ingested feeds."
-        
-    # 3. Format context string
-    context_text = ""
-    for idx, art in enumerate(context_articles):
-        context_text += f"\nDocument {idx+1} | Source: {art['source']} | URL: {art['url']}\nContent: {art['content']}\n"
-        
-    # 4. Build RAG prompt
-    prompt = RAG_PROMPT_TEMPLATE.format(
-        context_text=context_text,
-        query=user_query
+async def router_node(state: GraphState) -> GraphState:
+    query = state["query"]
+    # Taut Tiered Routing: simple intent uses cheaper model
+    response = await taut_client.chat.completions.create(
+        model=f"ollama/{OLLAMA_MODEL}",
+        messages=[{"role": "user", "content": f"Is this a greeting or a news query? Reply strictly with 'greeting' or 'news'. Query: {query}"}]
     )
-    
-    # 5. Query LLM to generate answer via Taut proxy with multi-tenant caching
-    try:
-        model_name = f"gemini/{GEMINI_MODEL}" if GEMINI_API_KEY else f"ollama/{OLLAMA_MODEL}"
-        response = await taut_client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-            extra_headers={"X-Taut-Namespace": user_phone_number}
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"RAG query generation failed: {str(e)}")
-        return "Error: Failed to generate response from LLM."
+    intent = response.choices[0].message.content.strip().lower()
+    state["intent"] = "greeting" if "greeting" in intent else "news"
+    return state
 
+async def research_node(state: GraphState) -> GraphState:
+    translated = await translate_query(state["query"])
+    state["semantic_query"] = translated.semantic_query
+    context = await execute_hybrid_search(translated, state["interests"])
+    state["context_articles"] = context
+    
+    context_text = ""
+    for idx, art in enumerate(context):
+        context_text += f"\nDocument {idx+1} | Source: {art['source']} | URL: {art['url']}\nContent: {art['content']}\n"
+    state["context_text"] = context_text
+    return state
+
+async def evaluator_node(state: GraphState) -> GraphState:
+    if not state["context_articles"]:
+        state["grade"] = "insufficient"
+        return state
+        
+    prompt = f"Does the following context contain enough information to answer the query? Context: {state['context_text']}\nQuery: {state['query']}\nReply strictly with 'sufficient' or 'insufficient'."
+    response = await taut_client.chat.completions.create(
+        model=f"ollama/{OLLAMA_MODEL}",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    grade = response.choices[0].message.content.strip().lower()
+    state["grade"] = "sufficient" if "sufficient" in grade else "insufficient"
+    return state
+
+async def web_search_node(state: GraphState) -> GraphState:
+    logger.info("Executing Web Search Fallback...")
+    # Mocking duckduckgo search
+    state["context_text"] += f"\nWeb Search Result: Latest news on {state['semantic_query']}.\n"
+    state["retries"] += 1
+    return state
+
+async def generate_node(state: GraphState) -> GraphState:
+    if state["intent"] == "greeting":
+        state["answer"] = "Hello! I am your personalized AI News Agent. What news are you looking for today?"
+        return state
+        
+    prompt = RAG_PROMPT_TEMPLATE.format(context_text=state["context_text"], query=state["query"])
+    model_name = f"gemini/{GEMINI_MODEL}" if GEMINI_API_KEY else f"ollama/{OLLAMA_MODEL}"
+    response = await taut_client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        extra_headers={"X-Taut-Namespace": state["phone_number"]}
+    )
+    state["answer"] = response.choices[0].message.content
+    return state
+
+# LangGraph Edge Routers
+def route_after_intent(state: GraphState) -> str:
+    return "generate" if state["intent"] == "greeting" else "research"
+
+def route_after_eval(state: GraphState) -> str:
+    if state["grade"] == "sufficient" or state["retries"] >= 1:
+        return "generate"
+    return "web_search"
+
+# Build CRAG Graph
+workflow = StateGraph(GraphState)
+workflow.add_node("router", router_node)
+workflow.add_node("research", research_node)
+workflow.add_node("evaluator", evaluator_node)
+workflow.add_node("web_search", web_search_node)
+workflow.add_node("generate", generate_node)
+
+workflow.set_entry_point("router")
+workflow.add_conditional_edges("router", route_after_intent, {"generate": "generate", "research": "research"})
+workflow.add_edge("research", "evaluator")
+workflow.add_conditional_edges("evaluator", route_after_eval, {"generate": "generate", "web_search": "web_search"})
+workflow.add_edge("web_search", "generate")
+workflow.add_edge("generate", END)
+
+crag_app = workflow.compile()
+
+async def query_news_rag(user_query: str, user_phone_number: str = "default_user", user_interests: List[str] = None) -> str:
+    user_interests = user_interests or []
+    initial_state = GraphState(
+        query=user_query,
+        phone_number=user_phone_number,
+        interests=user_interests,
+        semantic_query="",
+        context_articles=[],
+        context_text="",
+        answer="",
+        retries=0,
+        intent="",
+        grade=""
+    )
+    final_state = await crag_app.ainvoke(initial_state)
+    return final_state["answer"]

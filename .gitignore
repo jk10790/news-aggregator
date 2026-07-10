@@ -26,3 +26,5 @@ data/
 chroma_data/
 redpanda_data/
 .pytest_cache/
+outputs/
+daily_brief_*.json

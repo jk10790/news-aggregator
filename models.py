@@ -26,3 +26,6 @@ class ArticleVerified(ArticleRaw):
     Consumed by: storage/consumer_storage.py
     """
     triage_reason: str = Field(description="LLM explanation of why this article is relevant")
+    topics: list[str] = Field(default_factory=list, description="Categorized topics")
+    entities: list[str] = Field(default_factory=list, description="Extracted entities")
+    importance_score: int = Field(default=5, description="Global impact rating (1-10)")

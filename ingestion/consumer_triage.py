@@ -11,10 +11,22 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     LLM_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_HOST, OLLAMA_MODEL,
     REDPANDA_BROKER, TOPIC_RAW_ARTICLES, TOPIC_VERIFIED_ARTICLES,
-    USER_INTERESTS, RATE_DELAY_SECONDS, BACKOFF_BASE_SECONDS, MAX_RETRIES, TAUT_URL
+    RATE_DELAY_SECONDS, BACKOFF_BASE_SECONDS, MAX_RETRIES, TAUT_URL
 )
 from models import ArticleRaw, ArticleVerified
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from opentelemetry import trace
+from pydantic import BaseModel
+from typing import Literal
+
+tracer = trace.get_tracer(__name__)
+
+class TriageOutput(BaseModel):
+    relevant: bool
+    reasoning: str
+    topics: list[Literal["AI", "Cloud", "Security", "Startups", "Programming", "Distributed Systems", "Databases"]]
+    entities: list[str]
+    importance_score: int
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -40,9 +52,7 @@ async def query_llm_triage(title: str, source: str, summary: str) -> dict:
     Sends the article to the configured LLM provider via Taut proxy and returns the parsed JSON decision.
     Implements basic retries for robustness.
     """
-    system_prompt = TRIAGE_SYSTEM_PROMPT.format(
-        user_interests=USER_INTERESTS
-    )
+    system_prompt = TRIAGE_SYSTEM_PROMPT
     user_prompt = TRIAGE_USER_PROMPT.format(
         title=title,
         source=source,
@@ -53,15 +63,20 @@ async def query_llm_triage(title: str, source: str, summary: str) -> dict:
     
     for attempt in range(MAX_RETRIES):
         try:
-            response = await taut_client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                response_format={"type": "json_object"}
-            )
-            return json.loads(response.choices[0].message.content)
+            with tracer.start_as_current_span("llm_triage_query"):
+                response = await taut_client.beta.chat.completions.parse(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    response_format=TriageOutput,
+                    extra_headers={
+                        "X-Taut-System": "NewsAggregator",
+                        "X-Taut-Context": "Triage-Agent"
+                    }
+                )
+            return response.choices[0].message.parsed.model_dump()
                 
         except Exception as e:
             delay = BACKOFF_BASE_SECONDS * (2 ** attempt)  # Exponential backoff
@@ -70,7 +85,7 @@ async def query_llm_triage(title: str, source: str, summary: str) -> dict:
             
     # If all retries fail, default to false (safe fallback)
     logger.error(f"All LLM triage attempts failed for: '{title}'. Marking as irrelevant.")
-    return {"relevant": False, "reasoning": "LLM connection failed after multiple retries."}
+    return {"relevant": False, "reasoning": "LLM connection failed after multiple retries.", "topics": [], "entities": []}
 
 async def main():
     logger.info(f"Starting Triage Consumer (Provider: {LLM_PROVIDER.upper()})...")
@@ -98,13 +113,12 @@ async def main():
     
     try:
         while True:
-            # 3. Read raw messages with a 5-second idle timeout (drain mode)
+            # 3. Read raw messages with a 5-second timeout (continuous polling)
             try:
                 # If no message arrives for 5 seconds, raises asyncio.TimeoutError
                 msg = await asyncio.wait_for(consumer.getone(), timeout=5.0)
             except asyncio.TimeoutError:
-                logger.info("No raw articles received for 5 seconds. Assuming queue is drained.")
-                break
+                continue
                 
             # Decode and validate the message using our ArticleRaw contract
             article = ArticleRaw.model_validate_json(msg.value.decode("utf-8"))
@@ -114,10 +128,6 @@ async def main():
             
             # 4. Query LLM for triage decision
             decision = await query_llm_triage(article.title, article.source, article.summary)
-            
-            # Sleep to respect provider-specific rate constraints
-            if RATE_DELAY_SECONDS > 0:
-                await asyncio.sleep(RATE_DELAY_SECONDS)
             
             is_relevant = decision.get("relevant", False)
             reasoning = decision.get("reasoning", "No explanation.")
@@ -129,7 +139,9 @@ async def main():
                 # Instantiate the ArticleVerified contract
                 verified_article = ArticleVerified(
                     **article.model_dump(),
-                    triage_reason=reasoning
+                    triage_reason=reasoning,
+                    topics=decision.get("topics", []),
+                    entities=decision.get("entities", [])
                 )
                 
                 # Publish the serialized verified article to Redpanda

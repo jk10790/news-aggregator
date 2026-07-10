@@ -57,6 +57,21 @@ services:
       - "8002:8000"
 
   # =========================================================================
+  # PostgreSQL: Primary relational database
+  # =========================================================================
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: news_aggregator
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # =========================================================================
   # Taut: AI Efficiency Middleware Proxy
   # =========================================================================
   taut:
@@ -72,3 +87,7 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OLLAMA_API_BASE=http://host.docker.internal:11434
       - TAUT_ROUTING_TIERS={"simple":["ollama/${OLLAMA_MODEL:-llama3}"],"standard":["gemini/${GEMINI_MODEL:-gemini-2.5-flash}"],"complex":["gemini/${GEMINI_MODEL:-gemini-2.5-flash}"]}
+
+
+volumes:
+  postgres_data:

@@ -5,6 +5,7 @@ import html
 import os
 import sys
 import feedparser
+from bs4 import BeautifulSoup
 
 # Dynamic path resolution to import config from parent directory (project root)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,8 +35,19 @@ async def fetch_and_parse_feed(feed_name: str, feed_url: str) -> list:
             summary_raw = entry.get("summary", entry.get("description", ""))
             clean_summary = html.unescape(summary_raw)
             # Simple regex/replace to strip basic HTML tags if any exist
+            clean_summary = BeautifulSoup(clean_summary, "html.parser").get_text(separator=" ").strip()
+            
             import re
-            clean_summary = re.sub(r'<[^>]+>', '', clean_summary).strip()
+            noise_patterns = [
+                r"(?i)\bclick here\b",
+                r"(?i)\bsubscribe to our newsletter\b",
+                r"(?i)\bshare this on twitter\b",
+                r"(?i)\bread more\b",
+                r"(?i)\bsign up\b"
+            ]
+            # Split by basic sentence delimiters and filter out noisy sentences
+            sentences = [s.strip() for s in re.split(r'(?<=[.!?]) +', clean_summary) if s.strip()]
+            clean_summary = " ".join([s for s in sentences if not any(re.search(p, s) for p in noise_patterns)])
             
             article = ArticleRaw(
                 source=feed_name,

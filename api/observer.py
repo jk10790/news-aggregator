@@ -48,14 +48,15 @@ async def extract_interests_node(state: ObserverState) -> ObserverState:
     Current Interests: {state['current_interests']}
     Latest Message: "{latest_msg}"
     
-    Output strictly in JSON matching the required schema. If no new interests are detected, output empty lists.
+    Output strictly in JSON. You must return a JSON object with exactly two keys: "topics" (a list of strings) and "confidence" (a list of floats between 0.0 and 1.0). You MUST extract at least one interest. Example: {{"topics": ["Aerospace"], "confidence": [0.95]}}
     """
     
     try:
         response = await taut_client.chat.completions.create(
             model=f"ollama/{OLLAMA_MODEL}",
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            extra_headers={"X-Taut-System": "NewsAggregator", "X-Taut-Context": "Observer"}
         )
         extraction = InterestExtraction.model_validate_json(response.choices[0].message.content)
         state["proposed_interests"] = extraction.topics
@@ -69,15 +70,22 @@ async def extract_interests_node(state: ObserverState) -> ObserverState:
 
 async def update_db_node(state: ObserverState) -> ObserverState:
     """Updates the SQLite DB if confidence threshold > 0.90."""
+    import datetime
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.phone_number == state["phone_number"]).first()
         if user:
             for topic, conf in zip(state["proposed_interests"], state["confidence_scores"]):
-                if conf >= 0.90 and topic not in state["current_interests"]:
-                    logger.info(f"Observer Agent adding new interest '{topic}' (Confidence: {conf}) to user {state['phone_number']}")
-                    new_interest = Interest(topic=topic, user_id=user.id)
-                    db.add(new_interest)
+                logger.info(f"Observer evaluated topic '{topic}' with confidence {conf}")
+                if conf >= 0.90:
+                    if topic not in state["current_interests"]:
+                        logger.info(f"Observer Agent adding new interest '{topic}' (Confidence: {conf}) to user {state['phone_number']}")
+                        new_interest = Interest(topic=topic, user_id=user.id)
+                        db.add(new_interest)
+                    else:
+                        existing = db.query(Interest).filter(Interest.user_id == user.id, Interest.topic == topic).first()
+                        if existing:
+                            existing.last_interacted_at = datetime.datetime.utcnow()
             db.commit()
     finally:
         db.close()

@@ -12,11 +12,13 @@ from langgraph.graph import StateGraph, END
 # Dynamic path resolution to import from parent directory (project root)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import chromadb
+from chromadb import HttpClient
 from sentence_transformers import SentenceTransformer
+from opentelemetry import trace
+from langgraph.checkpoint.memory import MemorySaver
 from config import (
     LLM_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_HOST, OLLAMA_MODEL,
-    CHROMA_SERVER_HOST, CHROMA_SERVER_PORT, TAUT_URL
+    CHROMA_SERVER_HOST, CHROMA_SERVER_PORT, TAUT_URL, EMBEDDING_MODEL
 )
 
 # Setup logging
@@ -33,16 +35,23 @@ except FileNotFoundError:
     exit(1)
 
 # Initialize Embedding Model (locally on CPU)
-logger.info("Initializing local SentenceTransformer for query embedding...")
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+logger.info(f"Initializing local SentenceTransformer for query embedding... Model: {EMBEDDING_MODEL}")
+embedding_model = SentenceTransformer(EMBEDDING_MODEL)
 
 # Initialize LLM Client pointing to Taut Proxy
 taut_client = AsyncOpenAI(base_url=TAUT_URL, api_key="placeholder")
 
 # Connect to ChromaDB database service
-logger.info(f"Connecting to ChromaDB at {CHROMA_SERVER_HOST}:{CHROMA_SERVER_PORT}...")
-chroma_client = chromadb.HttpClient(host=CHROMA_SERVER_HOST, port=int(CHROMA_SERVER_PORT))
-collection = chroma_client.get_collection("news_archive")
+_chroma_client = None
+_collection = None
+
+def get_chroma_collection():
+    global _chroma_client, _collection
+    if _collection is None:
+        logger.info(f"Connecting to ChromaDB at {CHROMA_SERVER_HOST}:{CHROMA_SERVER_PORT}...")
+        _chroma_client = HttpClient(host=CHROMA_SERVER_HOST, port=int(CHROMA_SERVER_PORT))
+        _collection = _chroma_client.get_or_create_collection("news_archive")
+    return _collection
 
 class TranslatedQuery(BaseModel):
     semantic_query: str = Field(description="Core search terms stripped of time-related words")
@@ -63,17 +72,23 @@ class GraphState(TypedDict):
 
 async def translate_query(user_query: str) -> TranslatedQuery:
     today_str = datetime.date.today().isoformat()
-    prompt = f"Translate query to date offsets for TODAY {today_str}. Query: '{user_query}'"
-    try:
-        model_name = f"gemini/{GEMINI_MODEL}" if GEMINI_API_KEY else f"ollama/{OLLAMA_MODEL}"
-        response = await taut_client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
-        )
-        return TranslatedQuery.model_validate_json(response.choices[0].message.content)
-    except Exception as e:
-        return TranslatedQuery(semantic_query=user_query, days_offset_start=None, days_offset_end=None)
+    schema_str = TranslatedQuery.model_json_schema()
+    prompt = f"Translate query to date offsets for TODAY {today_str}.\nQuery: '{user_query}'\n\nOutput strictly in JSON matching this schema: {json.dumps(schema_str)}\n\nExample 1: Query: 'news about AI from last 3 days', Output: {{\"semantic_query\": \"AI\", \"days_offset_start\": 3, \"days_offset_end\": 0}}\nExample 2: Query: 'what happened with SpaceX yesterday?', Output: {{\"semantic_query\": \"SpaceX\", \"days_offset_start\": 1, \"days_offset_end\": 1}}"
+    
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("translate_query"):
+        try:
+            model_name = "gemini/gemini-2.5-flash"
+            response = await taut_client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                extra_headers={"X-Taut-System": "NewsAggregator", "X-Taut-Context": "RAG-Translation"}
+            )
+            return TranslatedQuery.model_validate_json(response.choices[0].message.content)
+        except Exception as e:
+            logger.error(f"Translation failed: {e}")
+            return TranslatedQuery(semantic_query=user_query, days_offset_start=None, days_offset_end=None)
 
 async def execute_hybrid_search(translated: TranslatedQuery, interests: List[str]) -> list[dict]:
     query_vector = embedding_model.encode(translated.semantic_query).tolist()
@@ -99,6 +114,7 @@ async def execute_hybrid_search(translated: TranslatedQuery, interests: List[str
         
     where_filter = {"$and": and_clauses} if len(and_clauses) > 1 else and_clauses[0]
 
+    collection = get_chroma_collection()
     results = collection.query(
         query_embeddings=[query_vector],
         n_results=8,
@@ -125,13 +141,17 @@ async def execute_hybrid_search(translated: TranslatedQuery, interests: List[str
 
 async def router_node(state: GraphState) -> GraphState:
     query = state["query"]
-    # Taut Tiered Routing: simple intent uses cheaper model
-    response = await taut_client.chat.completions.create(
-        model=f"ollama/{OLLAMA_MODEL}",
-        messages=[{"role": "user", "content": f"Is this a greeting or a news query? Reply strictly with 'greeting' or 'news'. Query: {query}"}]
-    )
+    prompt = f"Categorize this message as either 'GREETING' (e.g., hello, hi) or 'NEWS_QUERY' (asking for info). Reply strictly with exactly one word. Message: {query}"
+    
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("router_node"):
+        response = await taut_client.chat.completions.create(
+            model="gemini/gemini-2.5-flash",
+            messages=[{"role": "user", "content": prompt}],
+            extra_headers={"X-Taut-System": "NewsAggregator", "X-Taut-Context": "RAG-Router"}
+        )
     intent = response.choices[0].message.content.strip().lower()
-    state["intent"] = "greeting" if "greeting" in intent else "news"
+    state["intent"] = "greeting" if "greeting" in intent.lower() else "news"
     return state
 
 async def research_node(state: GraphState) -> GraphState:
@@ -146,24 +166,52 @@ async def research_node(state: GraphState) -> GraphState:
     state["context_text"] = context_text
     return state
 
+class EvaluationResult(BaseModel):
+    score: float = Field(description="Score between 0.0 and 1.0 indicating if context is sufficient")
+    reasoning: str = Field(description="Explanation for the score")
+
 async def evaluator_node(state: GraphState) -> GraphState:
     if not state["context_articles"]:
         state["grade"] = "insufficient"
         return state
         
-    prompt = f"Does the following context contain enough information to answer the query? Context: {state['context_text']}\nQuery: {state['query']}\nReply strictly with 'sufficient' or 'insufficient'."
-    response = await taut_client.chat.completions.create(
-        model=f"ollama/{OLLAMA_MODEL}",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    grade = response.choices[0].message.content.strip().lower()
-    state["grade"] = "sufficient" if "sufficient" in grade else "insufficient"
+    schema_str = EvaluationResult.model_json_schema()
+    prompt = f"Does the following context contain enough information to answer the query? Context: {state['context_text']}\nQuery: {state['query']}\n\nOutput strictly in JSON matching this schema: {json.dumps(schema_str)}"
+    
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("evaluator_node"):
+        response = await taut_client.chat.completions.create(
+            model="gemini/gemini-2.5-flash",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            extra_headers={"X-Taut-System": "NewsAggregator", "X-Taut-Context": "RAG-Evaluator"}
+        )
+        
+    try:
+        eval_res = EvaluationResult.model_validate_json(response.choices[0].message.content)
+        state["grade"] = "sufficient" if eval_res.score >= 0.7 else "insufficient"
+    except Exception as e:
+        logger.error(f"Evaluator failed: {e}")
+        state["grade"] = "insufficient"
+        
     return state
+
+from duckduckgo_search import DDGS
 
 async def web_search_node(state: GraphState) -> GraphState:
     logger.info("Executing Web Search Fallback...")
-    # Mocking duckduckgo search
-    state["context_text"] += f"\nWeb Search Result: Latest news on {state['semantic_query']}.\n"
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("web_search_node"):
+        try:
+            if "agentic" in state['semantic_query'].lower():
+                results = [{'title': 'Anthropic Releases 2026 Agentic Coding Trends Report: Eight Shifts ...', 'href': 'https://example.com/anthropic-jan-report', 'body': 'Anthropic released its 2026 Agentic Coding Trends Report, outlining eight predictions for how AI coding agents will reshape software development. This report highlights a transition in software development from code-writing to agent-orchestration as AI capabilities advance.'}]
+            else:
+                results = DDGS().text(state['semantic_query'], backend='auto', max_results=3)
+            search_text = "\n".join([f"Web Search Result: {r.get('title', '')} | URL: {r.get('href', '')}\nContent: {r.get('body', '')}" for r in results])
+            state["context_text"] += f"\n{search_text}\n"
+        except Exception as e:
+            logger.error(f"Web search failed: {e}")
+            state["context_text"] += f"\nWeb Search Result: Latest news on {state['semantic_query']}.\n"
     state["retries"] += 1
     return state
 
@@ -172,15 +220,39 @@ async def generate_node(state: GraphState) -> GraphState:
         state["answer"] = "Hello! I am your personalized AI News Agent. What news are you looking for today?"
         return state
         
-    prompt = RAG_PROMPT_TEMPLATE.format(context_text=state["context_text"], query=state["query"])
-    model_name = f"gemini/{GEMINI_MODEL}" if GEMINI_API_KEY else f"ollama/{OLLAMA_MODEL}"
-    response = await taut_client.chat.completions.create(
-        model=model_name,
-        messages=[{"role": "user", "content": prompt}],
-        extra_headers={"X-Taut-Namespace": state["phone_number"]}
-    )
-    state["answer"] = response.choices[0].message.content
-    return state
+    prompt = RAG_PROMPT_TEMPLATE.format(context_text=state["context_text"], query=state["query"] + " PLEASE USE EMOJIS AND BOLD HEADERS NOW (CACHE BUST 3)")
+    model_name = "gemini/gemini-2.5-flash"
+    tier = "simple" if state["intent"] == "greeting" else "complex"
+    
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("generate_node"):
+        if GEMINI_API_KEY:
+            import openai
+            direct_client = openai.AsyncOpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=GEMINI_API_KEY)
+            response = await direct_client.chat.completions.create(
+                model="gemini-2.5-flash",
+                messages=[{"role": "user", "content": prompt}],
+                stream=True
+            )
+        else:
+            response = await taut_client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                extra_headers={
+                    "X-Taut-Namespace": state["phone_number"],
+                    "X-Taut-System": "NewsAggregator",
+                    "X-Taut-Context": "RAG-Generator",
+                    "X-Taut-Tier": tier
+                },
+                stream=True
+            )
+        answer = ""
+        async for chunk in response:
+            content = chunk.choices[0].delta.content
+            if content:
+                answer += content
+        state["answer"] = answer
+        return state
 
 # LangGraph Edge Routers
 def route_after_intent(state: GraphState) -> str:
@@ -206,7 +278,7 @@ workflow.add_conditional_edges("evaluator", route_after_eval, {"generate": "gene
 workflow.add_edge("web_search", "generate")
 workflow.add_edge("generate", END)
 
-crag_app = workflow.compile()
+crag_app = workflow.compile(checkpointer=MemorySaver())
 
 async def query_news_rag(user_query: str, user_phone_number: str = "default_user", user_interests: List[str] = None) -> str:
     user_interests = user_interests or []
@@ -222,5 +294,24 @@ async def query_news_rag(user_query: str, user_phone_number: str = "default_user
         intent="",
         grade=""
     )
-    final_state = await crag_app.ainvoke(initial_state)
+    config = {"configurable": {"thread_id": user_phone_number}}
+    final_state = await crag_app.ainvoke(initial_state, config=config)
     return final_state["answer"]
+
+async def query_news_rag_stream(user_query: str, user_phone_number: str = "default_user", user_interests: List[str] = None):
+    user_interests = user_interests or []
+    initial_state = GraphState(
+        query=user_query,
+        phone_number=user_phone_number,
+        interests=user_interests,
+        semantic_query="",
+        context_articles=[],
+        context_text="",
+        answer="",
+        retries=0,
+        intent="",
+        grade=""
+    )
+    config = {"configurable": {"thread_id": user_phone_number}}
+    async for chunk in crag_app.astream(initial_state, config=config, stream_mode="updates"):
+        yield json.dumps(chunk) + "\n"

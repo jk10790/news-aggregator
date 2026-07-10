@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sentence_transformers import SentenceTransformer
 import chromadb
-from config import CHROMA_SERVER_HOST, CHROMA_SERVER_PORT
+from config import CHROMA_SERVER_HOST, CHROMA_SERVER_PORT, EMBEDDING_MODEL
 from models import ArticleVerified
 
 # Setup logging
@@ -19,8 +19,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Initialize the local embedding model on load
-logger.info("Loading local embedding model 'all-MiniLM-L6-v2'...")
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+logger.info(f"Loading local embedding model '{EMBEDDING_MODEL}'...")
+embedding_model = SentenceTransformer(EMBEDDING_MODEL)
 logger.info("Embedding model loaded successfully.")
 
 # Connect to the remote ChromaDB container
@@ -114,11 +114,27 @@ def store_article(article: ArticleVerified):
     # Parse human date to integer YYYYMMDD
     published_int = parse_date_to_int(article.published)
     
-    # 1. Store the Parent Document (Title + Summary) without embeddings
+    # 1. Deduplication Check (Semantic Similarity)
     parent_text = f"Title: {article.title}\nSummary: {article.summary}"
-    
-    logger.info(f"Storing Parent Document: {parent_id} | '{article.title}' | DateInt: {published_int}")
-    collection.add(
+    try:
+        dup_results = collection.query(
+            query_texts=[parent_text],
+            n_results=1,
+            where={"type": "parent"}
+        )
+        if dup_results and dup_results.get("distances") and len(dup_results["distances"][0]) > 0:
+            distance = dup_results["distances"][0][0]
+            # Cosine distance < 0.15 indicates highly overlapping semantic meaning
+            if distance < 0.15:
+                logger.info(f"Semantic Duplicate Detected (distance {distance:.3f}). Skipping: '{article.title}'")
+                return
+    except Exception as e:
+        logger.warning(f"Deduplication check failed, proceeding with insertion: {e}")
+
+    # 2. Store the Parent Document (Title + Summary) without embeddings
+    logger.info(f"Storing Parent Document: {parent_id} | '{article.title}' | DateInt: {published_int} | Impact: {article.importance_score}")
+    topics_str = ",".join(article.topics) if article.topics else ""
+    collection.upsert(
         ids=[parent_id],
         documents=[parent_text],
         metadatas=[{
@@ -128,7 +144,9 @@ def store_article(article: ArticleVerified):
             "source": article.source,
             "published": article.published,
             "published_int": published_int,
-            "triage_reason": article.triage_reason
+            "triage_reason": article.triage_reason,
+            "topics": topics_str,
+            "importance_score": article.importance_score
         }]
     )
     
@@ -154,10 +172,12 @@ def store_article(article: ArticleVerified):
             "source": article.source,
             "url": url,
             "published": article.published,
-            "published_int": published_int  # Propagate numeric date
+            "published_int": published_int,  # Propagate numeric date
+            "topics": topics_str,
+            "importance_score": article.importance_score
         })
         
-    collection.add(
+    collection.upsert(
         ids=child_ids,
         documents=child_chunks,
         embeddings=child_embeddings,

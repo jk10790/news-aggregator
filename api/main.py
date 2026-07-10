@@ -9,7 +9,7 @@ from typing import Optional
 # Dynamic path resolution to import from parent directory (project root)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from api.query_engine import query_news_rag
+from api.query_engine import query_news_rag, query_news_rag_stream
 from api.observer import observe_conversation
 from database import SessionLocal, User, Interest
 
@@ -81,6 +81,11 @@ async def twilio_webhook(request: Request):
             new_user = User(phone_number=sender_number)
             db.add(new_user)
             db.commit()
+            
+            # Solve cold start: assign a default interest so they get a brief tomorrow
+            default_interest = Interest(topic="Top News", user_id=new_user.id)
+            db.add(default_interest)
+            db.commit()
     finally:
         db.close()
         
@@ -98,11 +103,69 @@ async def twilio_webhook(request: Request):
     resp.message(answer)
     return str(resp)
 
-@app.post("/query", response_model=QueryResponse)
+@app.post("/webhook/telegram")
+async def telegram_webhook(request: Request):
+    """
+    Receives incoming messages from Telegram.
+    Hydrates state from SQLite and triggers LangGraph CRAG.
+    """
+    import asyncio
+    try:
+        data = await request.json()
+    except Exception:
+        return {"status": "ok"}
+        
+    message_obj = data.get('message')
+    if not message_obj or 'text' not in message_obj:
+        return {"status": "ok"}
+        
+    incoming_msg = message_obj['text'].strip()
+    sender_number = str(message_obj['chat']['id'])
+    
+    logger.info(f"Received Telegram message from {sender_number}: '{incoming_msg}'")
+    
+    asyncio.create_task(observe_conversation(sender_number, incoming_msg))
+    
+    db = SessionLocal()
+    user_interests = []
+    try:
+        user = db.query(User).filter(User.phone_number == sender_number).first()
+        if user:
+            user_interests = [i.topic for i in user.interests]
+        else:
+            new_user = User(phone_number=sender_number)
+            db.add(new_user)
+            db.commit()
+            default_interest = Interest(topic="Top News", user_id=new_user.id)
+            db.add(default_interest)
+            db.commit()
+    finally:
+        db.close()
+        
+    try:
+        answer = await query_news_rag(incoming_msg, sender_number, user_interests)
+    except Exception as e:
+        logger.error(f"Error executing RAG query: {str(e)}")
+        answer = "Sorry, I encountered an error processing your news request."
+
+    from config import TELEGRAM_BOT_TOKEN
+    if TELEGRAM_BOT_TOKEN:
+        import httpx
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": sender_number, "text": answer}
+        logger.info(f"Sending to Telegram: {answer}")
+        async def send_reply():
+            async with httpx.AsyncClient() as client:
+                await client.post(url, json=payload)
+        asyncio.create_task(send_reply())
+
+    return {"status": "ok"}
+
+@app.post("/query")
 async def handle_query(request: QueryRequest):
     """
     Submits a conversational query, runs semantic query translation,
-    queries the vector store, and returns a grounded answer.
+    queries the vector store, and returns a grounded answer (streamed).
     """
     query_str = request.query.strip()
     if not query_str:
@@ -120,8 +183,11 @@ async def handle_query(request: QueryRequest):
         db.close()
         
     try:
-        answer = await query_news_rag(query_str, request.phone_number, user_interests)
-        return QueryResponse(answer=answer)
+        from fastapi.responses import StreamingResponse
+        return StreamingResponse(
+            query_news_rag_stream(query_str, request.phone_number, user_interests),
+            media_type="application/x-ndjson"
+        )
     except Exception as e:
         logger.error(f"Error executing RAG query: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error executing query.")

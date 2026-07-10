@@ -35,12 +35,11 @@ async def main():
     
     try:
         while True:
-            # 2. Read messages with a 5-second idle timeout (drain mode)
+            # 2. Read messages with a 5-second timeout (continuous polling)
             try:
                 msg = await asyncio.wait_for(consumer.getone(), timeout=5.0)
             except asyncio.TimeoutError:
-                logger.info("No verified articles received for 5 seconds. Assuming queue is drained.")
-                break
+                continue
                 
             # Decode and validate using the ArticleVerified contract
             article = ArticleVerified.model_validate_json(msg.value.decode("utf-8"))

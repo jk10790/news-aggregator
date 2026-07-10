@@ -1,5 +1,5 @@
-import os
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
+import datetime
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Float, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 Base = declarative_base()
@@ -18,21 +18,19 @@ class Interest(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id'))
     topic = Column(String, nullable=False)
+    engagement_score = Column(Float, default=1.0)
+    last_interacted_at = Column(DateTime, default=datetime.datetime.utcnow)
     
     user = relationship("User", back_populates="interests")
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'news_aggregator.db')
-engine = create_engine(f'sqlite:///{DB_PATH}', connect_args={'check_same_thread': False})
+from config import DATABASE_URL
 
-# In SQLite, WAL mode allows concurrent reads and writes
-with engine.connect() as conn:
-    conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=5,
+    max_overflow=10
+)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-def init_db():
-    Base.metadata.create_all(bind=engine)
 
-if __name__ == "__main__":
-    init_db()
-    print("Database initialized.")

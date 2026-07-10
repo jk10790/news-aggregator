@@ -10,15 +10,22 @@ from pydantic import BaseModel, Field
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import taut
+from taut import TieredRoutingConfig, CapacityExceededError
+from taut import Compression as CompressionConfig
+from taut import SystemBlock
+from taut.core.prompt_blocks import ContextBlock, QueryBlock
 import chromadb
 from prefect import flow, task
 from prefect.tasks import task_input_hash
 
 from config import (
     LLM_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_HOST, OLLAMA_MODEL,
-    CHROMA_SERVER_HOST, CHROMA_SERVER_PORT, MAX_RETRIES
+    CHROMA_SERVER_HOST, CHROMA_SERVER_PORT, MAX_RETRIES,
+    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_SENDER,
+    MESSAGING_PROVIDER, TELEGRAM_BOT_TOKEN
 )
 from database import SessionLocal, User, Interest
+from twilio.rest import Client
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -55,8 +62,8 @@ try:
         REDUCE_PROMPT_TEMPLATE = f.read()
 except FileNotFoundError as e:
     logger.error(f"Failed to load prompts: {str(e)}.")
-    MAP_PROMPT_TEMPLATE = "Summarize these articles: {articles_text}"
-    REDUCE_PROMPT_TEMPLATE = "Compile these summaries: {map_summaries}"
+    MAP_PROMPT_TEMPLATE = "Summarize these articles."
+    REDUCE_PROMPT_TEMPLATE = "Compile these summaries."
 
 # =========================================================================
 # 3. Hybrid Client Initialization via Taut SDK
@@ -70,9 +77,8 @@ taut_config = taut.TautConfig(
     num_retries=MAX_RETRIES,
     timeout=60.0,
     fallback_models=[ollama_model_str],
-    routing=taut.TieredRoutingConfig(),
-    compression=taut.CompressionConfig(json=True, code=False),
-    rate_limiter=taut.TokenBucketRateLimiter(capacity=10, fill_rate=2) # Token bucket example
+    routing=TieredRoutingConfig(),
+    compression=CompressionConfig(json=True, code=False)
 )
 pipeline = taut.create_pipeline(taut_config)
 
@@ -82,27 +88,32 @@ REDUCE_LLM_PROVIDER = gemini_model_str if GEMINI_API_KEY else ollama_model_str
 # =========================================================================
 # 4. LLM Wrapper Functions
 # =========================================================================
-async def query_llm_map(articles_text: str) -> str:
+async def query_llm_map(articles_data: list[dict], interests: list[str]) -> str:
+    interests_str = ", ".join(interests) if interests else "general news"
     request = taut.LLMRequest(
+        intent="extract_article_bullets",
         blocks=[
-            taut.SystemBlock(content="You are a data extraction assistant."),
-            taut.ContextBlock(content=MAP_PROMPT_TEMPLATE),
-            taut.QueryBlock(content=f"Extract bullet points for the following batch:\n{articles_text}")
+            SystemBlock(content=f"You are a data extraction assistant tailored for a user interested in: {interests_str}."),
+            ContextBlock(content=MAP_PROMPT_TEMPLATE),
+            QueryBlock(content=json.dumps(articles_data))
         ],
         model=MAP_LLM_PROVIDER
     )
     response = await pipeline.run(request)
     return response.content
 
-async def query_llm_reduce(map_summaries: str) -> str:
+async def query_llm_reduce(map_summaries: str, interests: list[str]) -> str:
+    interests_str = ", ".join(interests) if interests else "general news"
     request = taut.LLMRequest(
+        intent="compile_daily_brief",
         blocks=[
-            taut.SystemBlock(content="You are a news compiler assistant. You MUST output strictly in JSON matching the schema."),
-            taut.ContextBlock(content=REDUCE_PROMPT_TEMPLATE),
-            taut.QueryBlock(content=f"Compile these summaries:\n{map_summaries}")
+            SystemBlock(content=f"You are a news compiler assistant. You MUST output strictly in JSON matching the schema: {DailyBrief.model_json_schema()}. Focus on the user's interests: {interests_str}."),
+            ContextBlock(content=REDUCE_PROMPT_TEMPLATE),
+            QueryBlock(content=f"Compile these summaries into a cohesive daily brief that specifically caters to someone interested in {interests_str}:\n{map_summaries}")
         ],
         model=REDUCE_LLM_PROVIDER,
-        response_format={"type": "json_object"}
+        response_format={"type": "json_object"},
+        max_tokens=4096
     )
     response = await pipeline.run(request)
     return response.content
@@ -110,30 +121,36 @@ async def query_llm_reduce(map_summaries: str) -> str:
 # =========================================================================
 # 5. Prefect Tasks and Flows
 # =========================================================================
-@task(retries=3, retry_delay_seconds=[10, 30, 60])
-async def compile_user_brief(user_id: int, phone_number: str, interests: list[str]):
+def fetch_articles_from_chroma(interests: list[str]) -> list[dict]:
     try:
         chroma_client = chromadb.HttpClient(host=CHROMA_SERVER_HOST, port=int(CHROMA_SERVER_PORT))
         collection = chroma_client.get_collection("news_archive")
     except Exception as e:
         logger.error(f"ChromaDB connection failed: {e}")
-        return
+        return []
     
     where_filter = {"type": "parent"}
-    if interests:
-        topic_clauses = [{"topic": {"$eq": interest}} for interest in interests]
+    # Filter out "Top News" as it's a generic fallback, not a strict taxonomy topic
+    valid_interests = [i for i in interests if i.lower() != "top news"]
+    
+    if valid_interests:
+        topic_clauses = [{"topic": {"$eq": interest}} for interest in valid_interests]
         if len(topic_clauses) > 1:
             where_filter = {"$and": [{"type": "parent"}, {"$or": topic_clauses}]}
         elif len(topic_clauses) == 1:
             where_filter = {"$and": [{"type": "parent"}, topic_clauses[0]]}
             
-    results = collection.get(where=where_filter)
-    documents = results.get("documents", [])
-    metadatas = results.get("metadatas", [])
+    # Use similarity query instead of get() to pull the top 10 most relevant articles
+    query_text = " ".join(interests) if interests else "important daily news tech startup"
+    results = collection.query(
+        query_texts=[query_text],
+        n_results=10,
+        where=where_filter
+    )
     
-    if not documents:
-        return
-        
+    documents = results.get("documents", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
+    
     articles_data = []
     for doc, meta in zip(documents, metadatas):
         articles_data.append({
@@ -142,39 +159,97 @@ async def compile_user_brief(user_id: int, phone_number: str, interests: list[st
             "url": meta.get("url", ""),
             "summary": doc
         })
-        
+    return articles_data
+
+async def run_map_reduce(articles_data: list[dict], interests: list[str], phone_number: str) -> str:
     batch_size = 5
     map_tasks = []
     for i in range(0, len(articles_data), batch_size):
         batch = articles_data[i:i+batch_size]
-        batch_text = ""
-        for idx, art in enumerate(batch):
-            batch_text += f"\n--- Article {idx+1} ---\nTitle: {art['title']}\nSource URL: {art['url']}\nContent: {art['summary']}\n"
-        map_tasks.append(query_llm_map(batch_text))
+        map_tasks.append(query_llm_map(batch, interests))
         
     try:
         map_summaries = await asyncio.gather(*map_tasks)
-    except getattr(taut.errors, "CapacityExceededError", Exception) as e:
-        # If CapacityExceededError is raised, it triggers Prefect retry backoff
+    except CapacityExceededError as e:
         logger.warning(f"Capacity exceeded for user {phone_number}. Yielding to Prefect backoff. {e}")
         raise
         
     combined_map_summaries = "\n\n".join(map_summaries)
-    
+    return await query_llm_reduce(combined_map_summaries, interests)
+
+def deliver_brief(phone_number: str, daily_brief_data: DailyBrief):
+    # Build the message body from the daily brief
+    body = f"*{daily_brief_data.date} Briefing*\n_{daily_brief_data.headline_summary}_\n\n"
+    for category in daily_brief_data.categories:
+        body += f"*{category.name}*\n"
+        for article in category.articles:
+            body += f"🔹 [{article.title}]({article.url})\n"
+            for insight in article.key_insights:
+                body += f"   • {insight}\n"
+            body += "\n"
+    body += "Reply to this message to ask questions about today's news!"
+
+    if MESSAGING_PROVIDER == "telegram":
+        if not TELEGRAM_BOT_TOKEN:
+            logger.warning("Telegram credentials missing. Skipping Telegram delivery.")
+            return
+        try:
+            import httpx
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": phone_number,
+                "text": body,
+                "parse_mode": "Markdown"
+            }
+            # We use httpx synchronously or asynchronously; since this is not strictly async we use sync
+            response = httpx.post(url, json=payload)
+            if response.status_code == 200:
+                logger.info(f"Telegram message sent to {phone_number}.")
+            else:
+                logger.error(f"Failed to send Telegram message to {phone_number}: {response.text}")
+        except Exception as e:
+            logger.error(f"Error sending Telegram message: {e}")
+
+    else: # Default to Twilio
+        if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+            logger.warning("Twilio credentials missing. Skipping WhatsApp delivery.")
+            return
+        try:
+            twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            message = twilio_client.messages.create(
+                from_=TWILIO_WHATSAPP_SENDER,
+                to=f"whatsapp:{phone_number}",
+                body=body
+            )
+            logger.info(f"WhatsApp message sent to {phone_number}: SID {message.sid}")
+        except Exception as e:
+            logger.error(f"Error sending Twilio message: {e}")
+
+@task(retries=3, retry_delay_seconds=[10, 30, 60])
+async def compile_user_brief(user_id: int, phone_number: str, interests: list[str]):
+    articles_data = fetch_articles_from_chroma(interests)
+    if not articles_data:
+        logger.info(f"No matching articles found for {phone_number}. Skipping brief.")
+        return
+        
     try:
-        raw_json_output = await query_llm_reduce(combined_map_summaries)
+        raw_json_output = await run_map_reduce(articles_data, interests, phone_number)
         daily_brief_data = DailyBrief.model_validate_json(raw_json_output)
         
-        output_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), f"daily_brief_{phone_number}.json")
+        outputs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "outputs")
+        os.makedirs(outputs_dir, exist_ok=True)
+        output_path = os.path.join(outputs_dir, f"daily_brief_{phone_number}.json")
         with open(output_path, "w") as f:
             f.write(daily_brief_data.model_dump_json(indent=2))
-        logger.info(f"Brief compiled for {phone_number}.")
+            
+        logger.info(f"Brief compiled and saved for {phone_number}.")
         
-        # Here we would use Twilio SDK to send the WhatsApp message
-        # twilio_client.messages.create(from_='whatsapp:+123', to=f'whatsapp:{phone_number}', body=f"Your brief is ready!")
+        # Deliver brief via chosen provider
+        deliver_brief(phone_number, daily_brief_data)
         
     except Exception as e:
-        logger.error(f"Reduce step failed: {e}")
+        logger.error(f"Failed to compile or deliver brief for {phone_number}: {e}")
+
 
 @flow(name="Daily Proactive WhatsApp Briefs")
 async def process_all_users():
@@ -183,9 +258,25 @@ async def process_all_users():
     
     tasks = []
     for user in users:
-        interests = [i.topic for i in user.interests]
-        # Prefect await tasks
-        await compile_user_brief(user.id, user.phone_number, interests)
+        import datetime
+        now = datetime.datetime.utcnow()
+        active_interests = []
+        for i in user.interests:
+            days_inactive = (now - i.last_interacted_at).days if getattr(i, 'last_interacted_at', None) else 0
+            engagement = getattr(i, 'engagement_score', 1.0)
+            engagement = engagement if engagement is not None else 1.0
+            decayed_score = engagement * (0.5 ** (days_inactive / 7.0))
+            if decayed_score >= 0.2:
+                active_interests.append(i.topic)
+        
+        if active_interests:
+            # Prefect await tasks
+            await compile_user_brief(user.id, user.phone_number, active_interests)
+            
+    # After generating all briefs, prune old articles from ChromaDB to maintain vector speed
+    from storage.cleanup import prune_old_articles
+    from config import CHROMA_RETENTION_DAYS
+    prune_old_articles(days_to_keep=CHROMA_RETENTION_DAYS)
 
 if __name__ == "__main__":
     asyncio.run(process_all_users())

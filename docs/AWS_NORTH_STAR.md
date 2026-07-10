@@ -63,19 +63,15 @@ This document outlines the migration of the Agentic Newsroom from a local Docker
 
 ---
 
-## 🚀 Feedback on the Taut SDK (Missing Features)
+## 🚀 Taut SDK Enterprise Capabilities
 
-While mapping this integration, I noticed a few features that `taut` is currently missing which would make it an undisputed powerhouse for Enterprise AWS workloads:
+The newly updated **Taut SDK** natively implements several critical features that make it an undisputed powerhouse for this Enterprise AWS workload:
 
 1. **Streaming Cache Playback (Critical for UX):**
-   * *Current State:* Taut explicitly does not cache streamed response chunks.
-   * *Feature Request:* For conversational AI (Phase 4), time-to-first-token (TTFT) is critical. Taut should support caching streamed responses and instantly "playing back" the stream from the cache, rather than forcing the app to choose between streaming (no cache) or blocking (caching).
-2. **Built-in Rate Limiting / Backpressure Queueing:**
-   * *Current State:* Taut relies on the application for rate limiting.
-   * *Feature Request:* In Phase 2 (Firehose Ingestion), we will easily hit AWS Bedrock's Tokens-Per-Minute (TPM) limits. Since Taut is already intercepting the traffic, it should offer a built-in leaky bucket or queuing mechanism to automatically hold and trickle requests when provider rate limits (429s) are approached.
+   * Taut supports caching streamed responses and instantly "playing back" the stream from the cache. For conversational AI (Phase 4), this minimizes time-to-first-token (TTFT) and guarantees instantaneous responses on repeat queries without blocking or degrading the chat UX.
+2. **Resilience Primitives (Token Buckets):**
+   * In Phase 2 (Firehose Ingestion), we will easily hit AWS Bedrock's Tokens-Per-Minute (TPM) limits. Taut intercepts this traffic and uses a Token Bucket algorithm to emit `CapacityExceededError`s. This allows our AWS Step Functions / Prefect MapReduce jobs to handle backpressure and retries cleanly, without bloating the SDK with persistent queuing dependencies.
 3. **Graph / XML Compression (Layer 3):**
-   * *Current State:* Payload compression handles JSON and Code natively.
-   * *Feature Request:* The implementation plan hints at Phase 2 GraphRAG. Adding native AST/structural compression for XML (RSS feeds) and Graph data (Cypher queries, RDF) would make Taut an essential tool for knowledge-graph pipelines.
-4. **Native AWS Auth (IAM / Parameter Store):**
-   * *Current State:* Taut relies on standard `.env` variables for API keys.
-   * *Feature Request:* If deployed on AWS ECS (Phase 1), Taut should ideally support native AWS IAM roles to assume permissions for Amazon Bedrock, without needing explicit API keys injected into the environment.
+   * Adding onto JSON and Code compression, Taut's Extensible Compression Layer natively handles AST/structural compression for XML (RSS feeds) and Graph data. This makes Taut an essential tool for Phase 2's knowledge-graph pipelines, drastically cutting down context window sizes before hitting the Cloud LLM.
+4. **Dynamic Fallback Routing:**
+   * Taut seamlessly supports dynamic fallback routing. If AWS Bedrock or the primary LLM throttles or times out under heavy load, Taut automatically reroutes the request to alternative fallback models, ensuring the conversational pipeline remains highly available.

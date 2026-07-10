@@ -20,10 +20,12 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def mock_db_session():
-    with patch("api.observer.SessionLocal") as mock_obs_session, \
+    with patch("api.main.SessionLocal") as mock_main_session, \
+         patch("api.observer.SessionLocal") as mock_obs_session, \
          patch("processor.daily_brief.SessionLocal") as mock_db_session:
         
         mock_db = MagicMock()
+        mock_main_session.return_value = mock_db
         mock_obs_session.return_value = mock_db
         mock_db_session.return_value = mock_db
         
@@ -53,9 +55,52 @@ def mock_chroma():
         mock_client.return_value.get_or_create_collection.return_value = mock_collection
         yield mock_client
 
+class MockResponse:
+    def __init__(self, content):
+        class Message:
+            def __init__(self, c):
+                self.content = c
+        class Choice:
+            def __init__(self, c):
+                self.message = Message(c)
+        self.choices = [Choice(content)]
+
+class MockStreamChunk:
+    def __init__(self, content):
+        class Delta:
+            def __init__(self, c):
+                self.content = c
+        class Choice:
+            def __init__(self, c):
+                self.delta = Delta(c)
+        self.choices = [Choice(content)]
+
+async def mock_chat_create(*args, **kwargs):
+    messages = kwargs.get("messages", [])
+    prompt = messages[0]["content"] if messages else ""
+    stream = kwargs.get("stream", False)
+    
+    if stream:
+        async def async_generator():
+            yield MockStreamChunk("Mocked ")
+            yield MockStreamChunk("RAG ")
+            yield MockStreamChunk("Answer.")
+        return async_generator()
+        
+    if "Translate query" in prompt or "Translate" in prompt:
+        return MockResponse('{"semantic_query": "AI", "days_offset_start": 0, "days_offset_end": 0}')
+    elif "Categorize this message" in prompt or "Is this a greeting" in prompt:
+        return MockResponse('NEWS_QUERY')
+    elif "Does the following context contain enough information" in prompt or "sufficient" in prompt:
+        return MockResponse('{"score": 0.9, "reasoning": "sufficient"}')
+    elif "observing a user" in prompt:
+        return MockResponse('{"topics": ["Aerospace"], "confidence": [0.95]}')
+        
+    return MockResponse("Mocked LLM Response")
+
 @pytest.fixture(autouse=True)
 def mock_llm_pipeline():
-    with patch("taut.TautPipeline.run") as mock_run:
+    with patch("taut.Pipeline.run") as mock_run:
         async def mock_run_coro(request):
             response = MagicMock()
             if request.intent == "extract_article_bullets":
@@ -83,9 +128,8 @@ def mock_llm_pipeline():
             
         mock_run.side_effect = mock_run_coro
         
-        # We also need to mock taut.create_pipeline in case it's called elsewhere
-        with patch("api.query_engine.pipeline.run", side_effect=mock_run_coro), \
-             patch("api.observer.pipeline.run", side_effect=mock_run_coro), \
+        with patch("api.query_engine.taut_client.chat.completions.create", side_effect=mock_chat_create), \
+             patch("api.observer.taut_client.chat.completions.create", side_effect=mock_chat_create), \
              patch("processor.daily_brief.pipeline.run", side_effect=mock_run_coro):
             yield mock_run
 

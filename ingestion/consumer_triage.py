@@ -27,6 +27,7 @@ class TriageOutput(BaseModel):
     topics: list[Literal["AI", "Cloud", "Security", "Startups", "Programming", "Distributed Systems", "Databases"]]
     entities: list[str]
     importance_score: int
+    key_insights: list[str]
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -111,44 +112,54 @@ async def main():
     total_processed = 0
     accepted_count = 0
     
-    try:
-        while True:
-            # 3. Read raw messages with a 5-second timeout (continuous polling)
-            try:
-                # If no message arrives for 5 seconds, raises asyncio.TimeoutError
-                msg = await asyncio.wait_for(consumer.getone(), timeout=5.0)
-            except asyncio.TimeoutError:
-                continue
-                
-            # Decode and validate the message using our ArticleRaw contract
+    semaphore = asyncio.Semaphore(10)
+
+    async def process_msg(msg):
+        nonlocal total_processed, accepted_count
+        try:
             article = ArticleRaw.model_validate_json(msg.value.decode("utf-8"))
-            total_processed += 1
+            logger.info(f"Triaging: '{article.title}' ({article.source})")
             
-            logger.info(f"[{total_processed}] Triaging: '{article.title}' ({article.source})")
-            
-            # 4. Query LLM for triage decision
-            decision = await query_llm_triage(article.title, article.source, article.summary)
+            async with semaphore:
+                decision = await query_llm_triage(article.title, article.source, article.summary)
             
             is_relevant = decision.get("relevant", False)
             reasoning = decision.get("reasoning", "No explanation.")
             
             if is_relevant:
-                accepted_count += 1
                 logger.info(f"   🟢 ACCEPTED: {reasoning}")
-                
-                # Instantiate the ArticleVerified contract
                 verified_article = ArticleVerified(
                     **article.model_dump(),
                     triage_reason=reasoning,
                     topics=decision.get("topics", []),
-                    entities=decision.get("entities", [])
+                    entities=decision.get("entities", []),
+                    key_insights=decision.get("key_insights", [])
                 )
-                
-                # Publish the serialized verified article to Redpanda
                 serialized_verified = verified_article.model_dump_json().encode("utf-8")
                 await producer.send_and_wait(TOPIC_VERIFIED_ARTICLES, value=serialized_verified)
+                return True
             else:
                 logger.info(f"   🔴 REJECTED: {reasoning}")
+                return False
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+            return False
+
+    try:
+        while True:
+            records = await consumer.getmany(timeout_ms=5000, max_records=50)
+            if not records:
+                continue
+                
+            tasks = []
+            for tp, messages in records.items():
+                for msg in messages:
+                    total_processed += 1
+                    tasks.append(process_msg(msg))
+                    
+            if tasks:
+                results = await asyncio.gather(*tasks)
+                accepted_count += sum(1 for res in results if res)
                 
     except Exception as e:
         logger.error(f"Error in Consumer Triage loop: {str(e)}")

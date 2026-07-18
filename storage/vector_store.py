@@ -134,6 +134,8 @@ def store_article(article: ArticleVerified):
     # 2. Store the Parent Document (Title + Summary) without embeddings
     logger.info(f"Storing Parent Document: {parent_id} | '{article.title}' | DateInt: {published_int} | Impact: {article.importance_score}")
     topics_str = ",".join(article.topics) if article.topics else ""
+    insights_str = " | ".join(article.key_insights) if getattr(article, "key_insights", None) else ""
+    
     collection.upsert(
         ids=[parent_id],
         documents=[parent_text],
@@ -146,7 +148,8 @@ def store_article(article: ArticleVerified):
             "published_int": published_int,
             "triage_reason": article.triage_reason,
             "topics": topics_str,
-            "importance_score": article.importance_score
+            "importance_score": article.importance_score,
+            "key_insights": insights_str
         }]
     )
     

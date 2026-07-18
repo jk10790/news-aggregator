@@ -93,17 +93,10 @@ async def translate_query(user_query: str) -> TranslatedQuery:
 async def execute_hybrid_search(translated: TranslatedQuery, interests: List[str]) -> list[dict]:
     query_vector = embedding_model.encode(translated.semantic_query).tolist()
     
-    # Pre-filtering constraints including user interests
+    # Pre-filtering constraints
+    # ChromaDB 0.6.x does not support $contains. We rely on vector similarity
+    # for topic relevance and only apply hard metadata filters (type, date range).
     and_clauses = [{"type": {"$eq": "child"}}]
-    
-    if interests:
-        # Filter by topics in user interests
-        # We assume the metadata contains a "topic" field
-        topic_clauses = [{"topic": {"$eq": interest}} for interest in interests]
-        if len(topic_clauses) > 1:
-            and_clauses.append({"$or": topic_clauses})
-        elif len(topic_clauses) == 1:
-            and_clauses.append(topic_clauses[0])
 
     if translated.days_offset_start is not None and translated.days_offset_end is not None:
         today = datetime.date.today()

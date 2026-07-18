@@ -76,7 +76,7 @@ taut_config = taut.TautConfig(
     provider="litellm",
     num_retries=MAX_RETRIES,
     timeout=60.0,
-    fallback_models=[ollama_model_str],
+    fallback_models=[ollama_model_str, gemini_model_str] if gemini_model_str else [ollama_model_str],
     routing=TieredRoutingConfig(),
     compression=CompressionConfig(json=True, code=False)
 )
@@ -130,151 +130,214 @@ def fetch_articles_from_chroma(interests: list[str]) -> list[dict]:
         logger.error(f"ChromaDB connection failed: {e}")
         return []
     
-    where_filter = {"type": "parent"}
-    # Filter out "Top News" as it's a generic fallback, not a strict taxonomy topic
     valid_interests = [i for i in interests if i.lower() != "top news"]
-    
-    if valid_interests:
-        topic_clauses = [{"topic": {"$eq": interest}} for interest in valid_interests]
-        if len(topic_clauses) > 1:
-            where_filter = {"$and": [{"type": "parent"}, {"$or": topic_clauses}]}
-        elif len(topic_clauses) == 1:
-            where_filter = {"$and": [{"type": "parent"}, topic_clauses[0]]}
-            
-    # Use similarity query instead of get() to pull the top 10 most relevant articles
-    query_text = " ".join(interests) if interests else "important daily news tech startup"
+    # Use semantic similarity as the primary relevance engine.
+    # ChromaDB 0.6.x does not support $contains — we only filter by type=parent
+    # and then do a fast Python-side topic check on the results.
+    query_text = " ".join(valid_interests) if valid_interests else "important daily news tech startup"
     results = collection.query(
         query_texts=[query_text],
-        n_results=10,
-        where=where_filter
+        n_results=20,           # Fetch more so post-filtering has enough to work with
+        where={"type": "parent"}
     )
     
     documents = results.get("documents", [[]])[0]
     metadatas = results.get("metadatas", [[]])[0]
     
+    # Python-side topic relevance check: keep articles whose stored topic
+    # matches at least one of the user's interests (case-insensitive substring)
+    interests_lower = [i.lower() for i in valid_interests]
     articles_data = []
     for doc, meta in zip(documents, metadatas):
-        articles_data.append({
-            "title": meta.get("title", "No Title"),
-            "source": meta.get("source", "Unknown"),
-            "url": meta.get("url", ""),
-            "summary": doc
-        })
-    return articles_data
+        stored_topic = meta.get("topics", "").lower()
+        topic_match = not valid_interests or any(
+            interest in stored_topic or stored_topic in interest
+            for interest in interests_lower
+        )
+        if topic_match:
+            articles_data.append({
+                "title": meta.get("title", "No Title"),
+                "source": meta.get("source", "Unknown"),
+                "url": meta.get("url", ""),
+                "summary": doc,
+                "key_insights": meta.get("key_insights", "")
+            })
+    
+    return articles_data[:10]  # Cap at 10 after filtering
+
 
 async def run_map_reduce(articles_data: list[dict], interests: list[str], phone_number: str) -> str:
-    batch_size = 5
-    map_tasks = []
-    for i in range(0, len(articles_data), batch_size):
-        batch = articles_data[i:i+batch_size]
-        map_tasks.append(query_llm_map(batch, interests))
-        
-    try:
-        map_summaries = await asyncio.gather(*map_tasks)
-    except CapacityExceededError as e:
-        logger.warning(f"Capacity exceeded for user {phone_number}. Yielding to Prefect backoff. {e}")
-        raise
-        
+    # We skip the Map phase because key_insights are already pre-computed during ingestion
+    map_summaries = []
+    for article in articles_data:
+        insights = article.get("key_insights", "")
+        if insights:
+            formatted_insights = insights.replace(' | ', '\n- ')
+            summary = f"Title: {article['title']}\nURL: {article['url']}\nInsights: {formatted_insights}"
+            map_summaries.append(summary)
+            
     combined_map_summaries = "\n\n".join(map_summaries)
     return await query_llm_reduce(combined_map_summaries, interests)
 
-def deliver_brief(phone_number: str, daily_brief_data: DailyBrief):
+import re as _re
+
+def _plain(text: str) -> str:
+    # Strip any LLM-generated markdown so Telegram formatting stays clean
+    text = _re.sub(r'\*\*(.*?)\*\*', r'\1', text)   # **bold** -> plain
+    text = _re.sub(r'\*(.*?)\*', r'\1', text)           # *italic* -> plain
+    text = _re.sub(r'__(.*?)__', r'\1', text)             # __bold__ -> plain
+    text = _re.sub(r'_(.*?)_', r'\1', text)               # _italic_ -> plain
+    text = _re.sub(r'`(.*?)`', r'\1', text)               # `code` -> plain
+    text = _re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)  # [text](url) -> text
+    return text.strip()
+
+def deliver_brief(user_label: str, daily_brief_data: DailyBrief,
+                  telegram_chat_id: str = None, telegram_bot_token: str = None,
+                  whatsapp_number: str = None):
+    """Deliver a brief to a user via their configured channel.
+    
+    Uses per-user telegram_bot_token stored in DB. Falls back to the
+    system TELEGRAM_BOT_TOKEN from .env if the user has no personal token.
+    """
     # Build the message body from the daily brief
-    body = f"*{daily_brief_data.date} Briefing*\n_{daily_brief_data.headline_summary}_\n\n"
+    body = f"\U0001f5de\ufe0f *THE DAILY BRIEF* | {daily_brief_data.date}\n"
+    body += "\u3030\ufe0f" * 11 + "\n"
+    body += f"_{_plain(daily_brief_data.headline_summary)}_\n\n"
+
     for category in daily_brief_data.categories:
-        body += f"*{category.name}*\n"
+        body += f"\U0001f525 *{category.name.upper()}*\n"
         for article in category.articles:
-            body += f"🔹 [{article.title}]({article.url})\n"
+            body += f"\U0001f4f0 *{_plain(article.title)}*\n"
             for insight in article.key_insights:
-                body += f"   • {insight}\n"
-            body += "\n"
-    body += "Reply to this message to ask questions about today's news!"
+                body += f"  \u2746 _{_plain(insight)}_\n"
+            body += f"  \U0001f517 [Read Full Story]({article.url})\n\n"
+
+    body += "\u3030\ufe0f" * 11 + "\n"
+    body += "\U0001f4ac *Want to dive deeper?* Reply to ask questions about today's news!"
 
     if MESSAGING_PROVIDER == "telegram":
-        if not TELEGRAM_BOT_TOKEN:
-            logger.warning("Telegram credentials missing. Skipping Telegram delivery.")
+        # Per-user token takes priority; fall back to system-wide .env token
+        effective_token = telegram_bot_token or TELEGRAM_BOT_TOKEN
+        effective_chat_id = telegram_chat_id
+
+        if not effective_token or not effective_chat_id:
+            logger.warning(f"Telegram not configured for user {user_label}. Skipping delivery.")
             return
         try:
             import httpx
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            url = f"https://api.telegram.org/bot{effective_token}/sendMessage"
             payload = {
-                "chat_id": phone_number,
+                "chat_id": effective_chat_id,
                 "text": body,
                 "parse_mode": "Markdown"
             }
-            # We use httpx synchronously or asynchronously; since this is not strictly async we use sync
             response = httpx.post(url, json=payload)
             if response.status_code == 200:
-                logger.info(f"Telegram message sent to {phone_number}.")
+                logger.info(f"Telegram message sent to {user_label} (chat_id={effective_chat_id}).")
             else:
-                logger.error(f"Failed to send Telegram message to {phone_number}: {response.text}")
+                logger.error(f"Failed to send Telegram message to {user_label}: {response.text}")
         except Exception as e:
-            logger.error(f"Error sending Telegram message: {e}")
+            logger.error(f"Error sending Telegram message to {user_label}: {e}")
 
-    else: # Default to Twilio
+    else:  # Twilio WhatsApp
         if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
             logger.warning("Twilio credentials missing. Skipping WhatsApp delivery.")
+            return
+        if not whatsapp_number:
+            logger.warning(f"No WhatsApp number for user {user_label}. Skipping delivery.")
             return
         try:
             twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
             message = twilio_client.messages.create(
                 from_=TWILIO_WHATSAPP_SENDER,
-                to=f"whatsapp:{phone_number}",
+                to=f"whatsapp:{whatsapp_number}",
                 body=body
             )
-            logger.info(f"WhatsApp message sent to {phone_number}: SID {message.sid}")
+            logger.info(f"WhatsApp message sent to {user_label}: SID {message.sid}")
         except Exception as e:
-            logger.error(f"Error sending Twilio message: {e}")
+            logger.error(f"Error sending Twilio message to {user_label}: {e}")
 
 @task(retries=3, retry_delay_seconds=[10, 30, 60])
-async def compile_user_brief(user_id: int, phone_number: str, interests: list[str]):
+async def compile_user_brief(user_id: int, user_label: str, interests: list[str],
+                              telegram_chat_id: str = None, telegram_bot_token: str = None,
+                              whatsapp_number: str = None):
     articles_data = fetch_articles_from_chroma(interests)
     if not articles_data:
-        logger.info(f"No matching articles found for {phone_number}. Skipping brief.")
+        logger.info(f"No matching articles found for {user_label}. Skipping brief.")
         return
-        
+
     try:
-        raw_json_output = await run_map_reduce(articles_data, interests, phone_number)
+        raw_json_output = await run_map_reduce(articles_data, interests, user_label)
         daily_brief_data = DailyBrief.model_validate_json(raw_json_output)
-        
+
         outputs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "outputs")
         os.makedirs(outputs_dir, exist_ok=True)
-        output_path = os.path.join(outputs_dir, f"daily_brief_{phone_number}.json")
+        safe_label = str(user_id)
+        output_path = os.path.join(outputs_dir, f"daily_brief_{safe_label}.json")
         with open(output_path, "w") as f:
             f.write(daily_brief_data.model_dump_json(indent=2))
-            
-        logger.info(f"Brief compiled and saved for {phone_number}.")
-        
-        # Deliver brief via chosen provider
-        deliver_brief(phone_number, daily_brief_data)
-        
+
+        logger.info(f"Brief compiled and saved for {user_label}.")
+
+        deliver_brief(
+            user_label=user_label,
+            daily_brief_data=daily_brief_data,
+            telegram_chat_id=telegram_chat_id,
+            telegram_bot_token=telegram_bot_token,
+            whatsapp_number=whatsapp_number,
+        )
+
     except Exception as e:
-        logger.error(f"Failed to compile or deliver brief for {phone_number}: {e}")
+        logger.error(f"Failed to compile or deliver brief for {user_label}: {e}")
 
 
 @flow(name="Daily Proactive WhatsApp Briefs")
 async def process_all_users():
     db = SessionLocal()
     users = db.query(User).all()
-    
-    tasks = []
+
+    import datetime
+    now = datetime.datetime.utcnow()
+
     for user in users:
-        import datetime
-        now = datetime.datetime.utcnow()
+        # Skip users with no delivery channel configured
+        has_telegram = bool(user.telegram_chat_id)
+        has_whatsapp = bool(user.phone_number)
+        if not has_telegram and not has_whatsapp:
+            logger.warning(f"User {user.id} has no delivery channel. Skipping.")
+            continue
+
+        # Skip paused users
+        if getattr(user, 'delivery_cadence', 'daily') == 'paused':
+            logger.info(f"User {user.id} is paused. Skipping.")
+            continue
+
+        # Compute engagement-decayed active interests
         active_interests = []
         for i in user.interests:
             days_inactive = (now - i.last_interacted_at).days if getattr(i, 'last_interacted_at', None) else 0
-            engagement = getattr(i, 'engagement_score', 1.0)
-            engagement = engagement if engagement is not None else 1.0
+            engagement = getattr(i, 'engagement_score', 1.0) or 1.0
             decayed_score = engagement * (0.5 ** (days_inactive / 7.0))
             if decayed_score >= 0.2:
                 active_interests.append(i.topic)
-        
-        if active_interests:
-            # Prefect await tasks
-            await compile_user_brief(user.id, user.phone_number, active_interests)
-            
-    # After generating all briefs, prune old articles from ChromaDB to maintain vector speed
+
+        if not active_interests:
+            logger.info(f"User {user.id} has no active interests. Skipping.")
+            continue
+
+        user_label = user.name or user.telegram_chat_id or user.phone_number or str(user.id)
+        await compile_user_brief(
+            user_id=user.id,
+            user_label=user_label,
+            interests=active_interests,
+            telegram_chat_id=user.telegram_chat_id,
+            telegram_bot_token=user.telegram_bot_token,  # None = fall back to system token
+            whatsapp_number=user.phone_number,
+        )
+
+    db.close()
+
+    # Prune old articles from ChromaDB to maintain vector search speed
     from storage.cleanup import prune_old_articles
     from config import CHROMA_RETENTION_DAYS
     prune_old_articles(days_to_keep=CHROMA_RETENTION_DAYS)

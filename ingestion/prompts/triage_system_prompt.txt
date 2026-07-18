@@ -63,5 +63,6 @@ Output:
   "reasoning": "Explain the decision in 10 words or less.",
   "topics": ["AI"],
   "entities": ["OpenAI"],
-  "importance_score": 5
+  "importance_score": 5,
+  "key_insights": ["Insight bullet 1", "Insight bullet 2"]
 }

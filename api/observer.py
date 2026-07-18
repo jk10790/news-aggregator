@@ -43,12 +43,15 @@ async def extract_interests_node(state: ObserverState) -> ObserverState:
     prompt = f"""
     You are an AI observing a user's conversational history.
     Based on their latest message, extract any implied topics of interest.
-    For example, if they ask about "SpaceX", output "Aerospace".
+    CRITICAL: You must explicitly calculate intent and sentiment negative constraints.
+    Distinguish between inquiry/curiosity ("Tell me more about X") and rejection/fatigue ("I don't care about Y", "stop showing me X").
+    ONLY extract topics the user has a POSITIVE sentiment or active curiosity towards.
+    If the user expresses fatigue or rejection of a topic (e.g., "I am sick of hearing about Elon Musk"), do NOT include it, or give it a 0.0 confidence score.
     
     Current Interests: {state['current_interests']}
     Latest Message: "{latest_msg}"
     
-    Output strictly in JSON. You must return a JSON object with exactly two keys: "topics" (a list of strings) and "confidence" (a list of floats between 0.0 and 1.0). You MUST extract at least one interest. Example: {{"topics": ["Aerospace"], "confidence": [0.95]}}
+    Output strictly in JSON. You must return a JSON object with exactly two keys: "topics" (a list of strings) and "confidence" (a list of floats between 0.0 and 1.0). Only include topics with positive sentiment. Example: {{"topics": ["Aerospace"], "confidence": [0.95]}}
     """
     
     try:

@@ -113,25 +113,16 @@ def active_interests(user, now: datetime.datetime) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Chroma boundary
-#
-# NOTE (Phase 6 concurrency): newsagg.storage.vector_store is being rewritten
-# concurrently by another agent to expose `topic_filter(slugs)` and a lazy
-# `get_collection()` accessor. At the time this file was written the rewrite
-# had not landed yet (vector_store.py only exposed `get_or_create_collection`
-# and stored topics as a comma-joined string, not the per-topic boolean keys
-# `taxonomy.chroma_key()` implies). The helpers below prefer the new names
-# and fall back to a local equivalent so this module stays importable and
-# testable either way; unit tests mock `_get_collection` directly so the
-# fallback path is never exercised by the test suite.
+# Chroma boundary — storage.vector_store owns the collection accessor and
+# the taxonomy-boolean where-clause builder (ADR-4/ADR-8); this module only
+# composes them with the brief-window date filter. Unit tests mock
+# `_get_collection` directly, so the real vector_store is never touched.
 # ---------------------------------------------------------------------------
 
 
 def _get_collection():
     from newsagg.storage import vector_store
 
-    if hasattr(vector_store, "get_collection"):
-        return vector_store.get_collection()
     return vector_store.get_or_create_collection()
 
 
@@ -141,15 +132,13 @@ def _topic_where(slug: str, cutoff_int: int) -> dict:
     date_clause = {"published_int": {"$gte": cutoff_int}}
 
     if slug == "top":
-        return {"$and": [{"type": "parent"}, {"importance_score": {"$gte": 8}}, date_clause]}
+        return {"$and": [{"type": {"$eq": "parent"}}, {"importance_score": {"$gte": 8}}, date_clause]}
 
-    if hasattr(vector_store, "topic_filter"):
-        topic_clause = vector_store.topic_filter([slug])
-    else:
-        # Pre-rewrite fallback: the plan's per-topic boolean metadata key.
-        topic_clause = {taxonomy.chroma_key(slug): True}
-
-    return {"$and": [{"type": "parent"}, topic_clause, date_clause]}
+    # topic_filter([slug]) already returns {"$and": [{"type": ...}, <topic
+    # clause>]} — splice the date clause into that same $and list rather
+    # than nesting another $and inside it.
+    topic_clause = vector_store.topic_filter([slug])
+    return {"$and": topic_clause["$and"] + [date_clause]}
 
 
 def fetch_topic_articles(slug: str, now: datetime.datetime) -> list[dict]:

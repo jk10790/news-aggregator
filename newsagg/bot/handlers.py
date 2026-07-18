@@ -88,18 +88,14 @@ def get_or_create_user(db, chat_id: str, first_name: str | None) -> User:
 def _render_brief_content(content) -> str:
     """Render a Brief.content JSON blob for chat display.
 
-    The exact shape of `content` is produced by processor/brief_engine.py
-    (Phase 6, owned by another agent in this overhaul) — assemble_brief()
-    there is documented to return HTML-ready text. We render defensively
-    so /brief degrades gracefully regardless of the final shape.
+    processor/brief_engine.py's assemble_brief() persists
+    `Brief.content = {"html": html_text}` where html_text is already
+    fully escaped/ready for parse_mode="HTML" (see
+    brief_engine._persist_brief). Render it as-is; fall back to a
+    defensively-escaped str() only for unexpected/legacy shapes.
     """
-    if isinstance(content, dict):
-        html_text = content.get("html")
-        if html_text:
-            return html_text
-        text = content.get("text")
-        if text:
-            return html.escape(str(text))
+    if isinstance(content, dict) and content.get("html"):
+        return content["html"]
     return html.escape(str(content))
 
 
@@ -286,8 +282,7 @@ async def handle_callback(api, callback_query: dict) -> None:
 async def handle_free_text(api, chat_id: str, text: str) -> None:
     db = SessionLocal()
     try:
-        user = get_or_create_user(db, chat_id, None)
-        user_id = user.id
+        get_or_create_user(db, chat_id, None)
     finally:
         db.close()
 
@@ -299,7 +294,9 @@ async def handle_free_text(api, chat_id: str, text: str) -> None:
     from newsagg.api.observer import observe_conversation
     from newsagg.api.query_engine import query_news_rag
 
-    asyncio.create_task(observe_conversation(user_id, text))
+    # observer.observe_conversation looks the user up by telegram_chat_id
+    # (a string), not the integer User.id primary key — pass the chat id.
+    asyncio.create_task(observe_conversation(str(chat_id), text))
 
     try:
         answer = await query_news_rag(text, str(chat_id))

@@ -6,10 +6,16 @@ from newsagg import config
 
 logger = logging.getLogger(__name__)
 
-_taut = openai.AsyncOpenAI(base_url=config.TAUT_URL, api_key="taut-local")
+# max_retries=0 on both clients: retries and fallback are this module's job
+# alone (ADR-3 — "one choke point for retries, fallback, metrics"). Without
+# this, the openai SDK's own default (2 retries -> 3 HTTP calls per
+# .create()) would silently triple the latency/cost of every attempt in the
+# loop below before our own retry-then-fallback logic ever gets a turn.
+_taut = openai.AsyncOpenAI(base_url=config.TAUT_URL, api_key="taut-local", max_retries=0)
 _gemini = openai.AsyncOpenAI(
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
     api_key=config.GEMINI_API_KEY,
+    max_retries=0,
 ) if config.GEMINI_API_KEY else None
 
 TIER_MODELS = {"simple": "ollama/llama3.1", "standard": "gemini/gemini-2.5-flash",

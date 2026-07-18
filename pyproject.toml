@@ -40,3 +40,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["newsagg*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: end-to-end tests requiring docker-compose infra (Postgres, Redpanda, Chroma, Taut) with LLM + Telegram mocked at the network boundary (Phase 9)",
+]

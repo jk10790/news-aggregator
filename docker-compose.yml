@@ -86,7 +86,17 @@ services:
       - TAUT_PROXY_HOST=0.0.0.0
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OLLAMA_API_BASE=http://host.docker.internal:11434
-      - TAUT_ROUTING_TIERS={"simple":["ollama/${OLLAMA_MODEL:-llama3}"],"standard":["gemini/${GEMINI_MODEL:-gemini-2.5-flash}"],"complex":["gemini/${GEMINI_MODEL:-gemini-2.5-flash}"]}
+      # Defaults match newsagg/core/llm.py TIER_MODELS exactly (ADR-3):
+      # simple -> ollama/llama3.1, standard & complex -> gemini/gemini-2.5-flash.
+      - TAUT_ROUTING_TIERS={"simple":["ollama/${OLLAMA_MODEL:-llama3.1}"],"standard":["gemini/${GEMINI_MODEL:-gemini-2.5-flash}"],"complex":["gemini/${GEMINI_MODEL:-gemini-2.5-flash}"]}
+    healthcheck:
+      # No curl in python:3.11-slim, so hit taut's own metrics endpoint
+      # (taut/proxy/routes.py: GET /v1/taut/metrics) with a stdlib client.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/taut/metrics', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 
 volumes:

@@ -5,12 +5,9 @@ from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
 from alembic import context
-import os
-import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from database import Base
-from config import DATABASE_URL
+from newsagg.db.schema import Base
+from newsagg.config import DATABASE_URL
 
 config = context.config
 config.set_main_option('sqlalchemy.url', DATABASE_URL)

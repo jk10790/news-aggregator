@@ -28,3 +28,8 @@ redpanda_data/
 .pytest_cache/
 outputs/
 daily_brief_*.json
+*.db
+
+# Editable install / egg metadata
+*.egg-info/
+build/

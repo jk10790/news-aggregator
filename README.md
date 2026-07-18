@@ -1,135 +1,203 @@
-# Personalized AI News Aggregator & Analyst (Local-First MVP)
+# News Aggregator — Personalized Telegram News Bot
 
-A local-first, event-driven news pipeline that ingests technical RSS feeds, filters articles using high-speed LLM triage, processes and indexes them into a hierarchical parent-child ChromaDB vector store, consolidates daily briefs using local Map-Reduce summarization, and exposes them via a conversational RAG API.
+A local-first, event-driven news pipeline: RSS feeds are ingested, triaged by
+an LLM into a fixed topic taxonomy, embedded into ChromaDB, and delivered as
+a personalized daily/weekly brief to each user's Telegram chat at the hour
+they choose — with zero operator involvement after `/start`. Users can also
+just ask the bot questions and get a conversational, RAG-backed answer.
 
----
-
-## 📚 Documentation Index
-
-To keep this repository clean and organized, all detailed documentation has been consolidated:
-
-**Core System Guides:**
-- **[PRODUCT_BRIEF.md](PRODUCT_BRIEF.md)**: Product vision, feature requirements, and client specifications.
-- **[ARCHITECTURE.md](ARCHITECTURE.md)**: Architecture, Mermaid diagrams, deployment strategies, and Taut SDK requirements.
-- **[DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md)**: Guidelines for contributing and working with the codebase.
-- **[TWILIO_GUIDE.md](TWILIO_GUIDE.md)**: Webhook tunneling, and pricing for the WhatsApp integration.
-- **[TELEGRAM_GUIDE.md](TELEGRAM_GUIDE.md)**: Webhook configuration for the 100% free Telegram bot integration.
-
-**In-Depth Technical Research (`docs/` folder):**
-- **[Rag And Query Translation](docs/rag_and_query_translation.md)**: CRAG framework and routing details.
-- **[Hybrid Search Metadata](docs/hybrid_search_metadata.md)**: ChromaDB vector metadata design.
-- **[Map Reduce Summarization](docs/map_reduce_summarization.md)**: Async LLM reduce strategies.
-- **[Data Contracts](docs/data_contracts.md)** & **[Structured Outputs](docs/structured_outputs.md)**: Pydantic schemas.
-- **[Prompt Engineering](docs/prompt_engineering.md)** & **[Rag Best Practices](docs/rag_best_practices.md)**.
-- **[Vector Databases](docs/vector_databases.md)** & **[Scaling Vector DBs](docs/scaling_vector_dbs.md)**.
+See `docs/OVERHAUL_PLAN.md` for the full design rationale (ADRs) behind the
+current architecture.
 
 ---
 
-## Technical Stack & Infrastructure
+## 1. Quickstart
 
-This architecture runs locally inside a Docker Compose cluster using **Taut** as a stateless LLM proxy middleware.
+```bash
+git clone <this-repo>
+cd news-aggregator
 
-| Service | Port | Local Endpoint | Purpose in the System |
-| :--- | :--- | :--- | :--- |
-| **Redpanda** | `9092` / `29092` | `localhost:9092` | Kafka-compatible event stream broker buffering data flows. |
-| **Redpanda Console** | `8080` | [http://localhost:8080](http://localhost:8080) | Web-based GUI to inspect topics, offsets, and payloads. |
-| **ChromaDB** | `8002` | [http://localhost:8002](http://localhost:8002) | Vector database storing semantic text embeddings and parent-child metadata. |
-| **Taut Proxy** | `8000` | [http://localhost:8000](http://localhost:8000) | AI Efficiency Middleware intercepting, caching, and routing LLM requests. |
-| **Ollama** | `11434` | [http://localhost:11434](http://localhost:11434) | Local runtime hosting offline LLM models (e.g., Llama-3). |
-| **FastAPI Server** | `8050` | [http://localhost:8050](http://localhost:8050) | The API gateway serving RAG queries and pre-compiled briefs. |
+cp .env.example .env
+# edit .env: at minimum set TELEGRAM_BOT_TOKEN (from @BotFather) and
+# GEMINI_API_KEY (https://aistudio.google.com/apikey)
+
+docker compose up -d          # Redpanda, ChromaDB, Postgres, Taut proxy
+
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[test]"
+
+alembic upgrade head           # creates users/interests/topic_modules/briefs
+
+./scripts/dev.sh                # runs migrations again (idempotent) + starts
+                                 # api, triage, storage, bot, scheduler
+```
+
+Then, on a fresh RSS ingest (see §5), message your bot on Telegram:
+
+```
+/start          -> pick your topics from the inline keyboard, tap Done
+/schedule       -> pick a delivery hour (all times UTC)
+```
+
+At the chosen hour, you'll receive an HTML-formatted brief built from real
+ingested articles in your topics. No `.env`/DB edits required from an
+operator at any point.
 
 ---
 
-## 🚀 Quick Start Guide
+## 2. Services & ports
 
-This architecture is **Event-Driven**. Because of this, the system is split into two types of programs: **Always-On Daemons** and **Scheduled Batch Scripts**.
+| Service | Port | Purpose |
+| :--- | :--- | :--- |
+| Redpanda | `9092` / `29092` | Kafka-compatible broker: `raw-articles` → `verified-articles`, plus `triage-dlq` / `storage-dlq`. |
+| Redpanda Console | `8080` | Web UI to inspect topics/offsets ([http://localhost:8080](http://localhost:8080)). |
+| ChromaDB | `8002` (container `8000`) | Vector store: parent/child chunks, taxonomy-boolean metadata. |
+| Postgres | `5432` | `users`, `interests`, `topic_modules`, `briefs` (Alembic-managed). |
+| Taut proxy | `8000` | OpenAI-compatible LLM gateway (`newsagg/core/llm.py`'s only client target); routes `simple` → local Ollama, `standard`/`complex` → Gemini, with a direct-Gemini fallback baked into the gateway if Taut is unreachable. |
+| FastAPI (`newsagg-api`) | `8050` | `/query` (NDJSON RAG stream), `/brief/{chat_id}`, `/webhook/telegram` (deploy-time alternative to long-polling), `/health`. |
 
-**Prerequisites:** 
-1. `docker` and `docker-compose` installed.
-2. A populated `.env` file (copy `.env.example`).
-3. Virtual environment activated: `source .venv/bin/activate`.
-4. Run `docker-compose up -d` and initialize the database: `alembic upgrade head`.
+---
 
-### 1. Always-On Daemons (Leave these running!)
-These scripts must run 24/7. They maintain persistent network connections to listen for live events (either from Redpanda or from Telegram). A cron job cannot run these because they are designed to never exit.
+## 3. Architecture
 
-Open 3 separate terminal tabs and leave these running:
-
-**Tab 1 (Triage Agent):** Continuously listens to the Redpanda broker. As soon as a raw article hits the queue, it evaluates it using Ollama.
-```bash
-python ingestion/consumer_triage.py
 ```
-**Tab 2 (Storage Agent):** Continuously listens to the Redpanda broker. As soon as a verified article is approved, it encodes it into ChromaDB.
-```bash
-python storage/consumer_storage.py
+                      ┌─────────────────────────────────────────────┐
+                      │ docker-compose: redpanda, chroma, postgres, │
+                      │                 taut, (redpanda-console)    │
+                      └─────────────────────────────────────────────┘
+
+ RSS feeds ──> ingestion/producer ──> [raw-articles] ──> ingestion/triage ──> [verified-articles]
+   (cron/loop)      (Kafka)                (LLM via core/llm, tier=simple)        │
+                                            failures -> [triage-dlq]              ▼
+                                                                        storage/consumer
+                                                                        (embed via core/embeddings,
+                                                                         taxonomy bools, importance,
+                                                                         semantic dedup, upsert)
+                                                                                  │
+                                                                                  ▼
+                                                                              ChromaDB
+                                                                                  │
+ ┌────────────────────────── scheduler service (asyncio, 1-min tick) ────────────┤
+ │  hourly: users due this hour -> union of their topics                         │
+ │          -> topic modules (1 LLM call/topic, cached in Postgres)              │
+ │          -> stitch per-user brief (0 LLM calls) -> deliver -> record          │
+ │  daily 03:00 UTC: chroma retention cleanup                                    │
+ └───────────────────────────────────────────────────────────────────────────────┘
+                                                                                  │
+ Telegram user <──> bot service (long-poll getUpdates)                            │
+   /start  -> create user (telegram_chat_id), interest picker (inline keyboard)   │
+   /topics -> picker    /schedule -> cadence+hour picker    /brief -> latest brief│
+   free text -> RAG (LangGraph CRAG via core/llm) <───────────────────────────────┘
+               └─> observer (implicit interests, taxonomy-constrained)
+
+ FastAPI (api/) : /query (NDJSON stream), /brief/{chat_id}, /webhook/telegram (deploy mode), /health
 ```
-**Tab 3 (FastAPI & Webhooks):** Runs your ASGI web server on `http://localhost:8050`. It must be online 24/7 to receive and respond to incoming Telegram/WhatsApp messages from users.
+
+Key design decisions (full rationale in `docs/OVERHAUL_PLAN.md` §2):
+
+- **Telegram only** — one product bot, long-polling by default (no public
+  URL/ngrok needed); the FastAPI webhook is a deploy-time alternative that
+  calls the exact same handler functions.
+- **One LLM gateway** (`newsagg/core/llm.py`) — every LLM call in the
+  codebase goes through `complete()`. It's the only module allowed to
+  construct an `openai.AsyncOpenAI` client, and the only place retry/tier
+  routing/Taut→Gemini fallback logic lives.
+- **Fixed topic taxonomy** (`newsagg/core/taxonomy.py`) — triage, storage,
+  the interest picker, and the Observer all classify into the same 10
+  slugs (`ai`, `cloud`, `security`, `startups`, `programming`, `distsys`,
+  `databases`, `business`, `science`, `sports`) plus a pseudo-topic `top`
+  (importance ≥ 8, any category). No free-form topic strings anywhere.
+- **Topic-centric briefs** — one LLM call per active *topic* per day
+  (cached in Postgres as `TopicModule`), not one per user. Per-user briefs
+  are template-stitched from cached modules with zero additional LLM calls.
+- **Explicit interests never decay; implicit ones do** — a topic the user
+  tapped in `/topics` stays forever; a topic the Observer inferred from
+  free text decays (`0.5 ** (days_since / 14)`) and drops out below 0.2.
+
+---
+
+## 4. Bot commands
+
+| Command / input | Behavior |
+| :--- | :--- |
+| `/start` | Onboard (creates the user keyed on `telegram_chat_id`) and show the topic picker. Re-running it re-shows the picker. |
+| `/topics` | Show the interest picker reflecting current selections; tap a topic to toggle it, tap Done to close. |
+| `/schedule` | Pick delivery cadence (Daily / Weekly / Pause) and delivery hour (00–23, UTC). |
+| `/brief` | Show your latest delivered brief, or a friendly "nothing yet" / "pick topics first" message. |
+| `/help` | List commands. |
+| Any other text | Routed through a LangGraph CRAG pipeline (vector search + web-search fallback) for a conversational answer; also silently updates your implicit interests via the Observer. |
+
+---
+
+## 5. Ingesting news
+
+The producer isn't a long-running daemon (it's not one of the 5 services
+`scripts/dev.sh` starts) — run it manually or on a cron to pull fresh RSS
+articles into the pipeline:
+
 ```bash
-python api/main.py
+newsagg-producer          # or: python -m newsagg.ingestion.producer
 ```
 
-### 2. Scheduled Batch Scripts (Manual or Cron)
-Unlike the daemons, these scripts are designed to wake up, perform a specific task, and then shut down. These are the scripts you put in a cron job.
+The triage and storage consumers (already running via `dev.sh`) will pick
+the new articles up automatically and index them into ChromaDB with real
+importance scores and taxonomy metadata.
 
-**A. Ingesting the News (The RSS Scraper)**
-You must explicitly trigger the RSS scraper to fetch new articles. In production, this should be a cron job running every 6 hours.
+### Backfilling after a metadata-shape change
+
+If you're upgrading from a pre-overhaul checkout, old ChromaDB entries won't
+have the current per-topic boolean metadata and will silently fail to match
+any brief/topic filter. Re-ingest from a clean slate:
+
 ```bash
-# Run this manually whenever you want to fetch the latest news:
-python ingestion/producer.py
-```
-
-**B. Sending the Daily Briefs**
-You must explicitly trigger the Map-Reduce pipeline that compiles the daily news and messages users. In production, this should be a cron job running every morning at 7:00 AM.
-```bash
-# Run this manually to generate and send out briefs to all registered users:
-python processor/daily_brief.py
-```
-
-**Production Cron Setup Example (`crontab -e`):**
-```bash
-# Run RSS Ingestion every 6 hours
-0 */6 * * * cd /path/to/news-aggregator && .venv/bin/python ingestion/producer.py
-
-# Send Daily Briefs every morning at 7:00 AM
-0 7 * * * cd /path/to/news-aggregator && .venv/bin/python processor/daily_brief.py
+python scripts/backfill_reingest.py     # deletes the news_archive collection
+newsagg-producer                        # re-run the producer once
+# let the triage/storage consumers (already running) drain the new articles
 ```
 
 ---
 
-## Verification & API Commands
+## 6. Testing
 
-Once the server is running, verify it using `curl` from another terminal tab:
-
-### 1. Conversational Query (Fact-Seeking RAG)
 ```bash
-curl -X POST http://localhost:8050/query \
-     -H "Content-Type: application/json" \
-     -d '{"query": "What is Web Search on Bedrock AgentCore?"}'
+pytest tests/unit                 # hermetic — no docker, no network, no LLM calls
+docker compose up -d               # required for the e2e suite below
+pytest tests/e2e -m e2e            # real Postgres/Redpanda/Chroma; LLM + Telegram mocked
 ```
 
-### 2. Conversational Query (Relative Time Pre-Filtered)
-```bash
-curl -X POST http://localhost:8050/query \
-     -H "Content-Type: application/json" \
-     -d '{"query": "What updates happened yesterday?"}'
-```
+`tests/unit/` covers taxonomy, the LLM gateway (respx-mocked Taut→Gemini
+fallback + retries), triage validation/DLQ routing, the Chroma topic filter,
+interest decay, brief HTML assembly, scheduler due-selection, and bot
+handlers (fake Telegram API + in-memory sqlite).
 
-### 3. Fetch Consolidation Brief
-```bash
-curl http://localhost:8050/brief
-```
+`tests/e2e/test_pipeline.py` is the one test that would have caught every
+shipped regression to date: it seeds a real user, publishes a real article
+through real Redpanda, runs one real triage + storage batch (LLM canned),
+then runs the real hourly scheduler and asserts a real Telegram
+`sendMessage` was made containing that article's title and url, and that a
+`Brief` row was recorded and marked delivered.
 
 ---
 
-## 🧠 The User Experience Lifecycle (How it Works)
+## 7. Repo layout
 
-The system is designed to require zero explicit configuration from the end user. It learns what they like entirely through conversation.
+```
+newsagg/
+├── config.py            # env parsing only
+├── core/                 # taxonomy, LLM gateway, embeddings, shared models
+├── db/                   # SQLAlchemy schema + session factory
+├── ingestion/             # RSS producer, triage consumer
+├── storage/               # ChromaDB consumer, vector store, retention cleanup
+├── processor/             # topic-module + brief assembly engine
+├── bot/                   # Telegram API wrapper, handlers, long-poll loop
+├── scheduler/              # 1-minute-tick asyncio scheduler
+└── api/                    # FastAPI app, RAG query engine, observer
 
-1. **The "Cold Start" (Initial Setup):**
-   When a user sends their very first message to the bot on Telegram, the system automatically creates their profile in the PostgreSQL database. Because we don't know what they like yet, the system assigns a default interest of `"Top News"`. This ensures that even if they never ask a specific question, they will still receive a generalized Daily Brief the next morning.
-   
-2. **Refining Interests (The Observer Agent):**
-   Every time the user asks a question (e.g., *"Did Apple release anything today?"* or *"Any news on PostgreSQL performance?"*), the message is processed by a background worker called the **Observer Agent**. This agent performs zero-shot entity extraction to quietly update their profile in the database, adding "Apple" or "PostgreSQL" to their explicit list of interests.
-
-3. **Interest Decay (The Forgetting Algorithm):**
-   Over time, users change jobs or lose interest in certain topics. Our database tracks an `engagement_score` and `last_interacted_at` timestamp for every topic. If a user stops asking about "React.js", the interest decays mathematically. Once it drops below a specific threshold (e.g., after a few weeks of inactivity), the system stops pulling articles about React.js for their personalized Daily Brief.
+alembic/                  # migrations (Postgres only — no create_all)
+scripts/dev.sh             # docker compose up + migrate + launch all services
+scripts/backfill_reingest.py
+tests/unit/                # hermetic
+tests/e2e/                  # requires docker compose
+docs/OVERHAUL_PLAN.md       # architecture ADRs + phase-by-phase build log
+docs/ROADMAP.md              # explicitly out-of-scope-for-v1 future hooks
+```

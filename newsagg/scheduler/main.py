@@ -1,6 +1,6 @@
-"""Asyncio scheduler service (ADR-6 — replaces Prefect; one long-running
-1-minute-tick loop, hour-gated brief delivery + daily 03:00 UTC retention
-cleanup).
+"""Asyncio scheduler service (ADR-6 — one long-running, dependency-free
+1-minute-tick loop instead of a workflow-orchestrator framework; hour-gated
+brief delivery + daily 03:00 UTC retention cleanup).
 """
 import asyncio
 import datetime

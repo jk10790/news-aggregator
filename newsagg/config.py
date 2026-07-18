@@ -73,7 +73,7 @@ TOPIC_VERIFIED_ARTICLES = "verified-articles"
 
 # =========================================================================
 # 4. Telegram (ADR-1/ADR-2 — the ONE product bot; no per-user bot tokens,
-#    no Twilio/WhatsApp)
+#    Telegram is the only delivery channel in v1)
 # =========================================================================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_POLL_TIMEOUT = int(os.getenv("TELEGRAM_POLL_TIMEOUT", "50"))

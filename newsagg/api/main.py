@@ -1,17 +1,13 @@
 import json
 import logging
 import os
-import sys
-from fastapi import FastAPI, HTTPException, Request, Form
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
-from typing import Optional
 
-# Dynamic path resolution to import from parent directory (project root)
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from api.query_engine import query_news_rag, query_news_rag_stream
-from api.observer import observe_conversation
-from database import SessionLocal, User, Interest
+from newsagg.api.query_engine import query_news_rag, query_news_rag_stream
+from newsagg.api.observer import observe_conversation
+from newsagg.db.database import SessionLocal
+from newsagg.db.schema import User, Interest
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -46,86 +42,41 @@ def read_root():
         "endpoints": {
             "POST /query": "Submit natural language queries",
             "GET /brief": "Retrieve the pre-compiled Daily Brief JSON",
-            "POST /webhook/twilio": "Twilio WhatsApp Webhook"
+            "POST /webhook/telegram": "Telegram webhook (deploy-time alternative to long-polling)"
         }
     }
 
-@app.post("/webhook/twilio")
-async def twilio_webhook(request: Request):
-    """
-    Receives incoming WhatsApp messages from Twilio.
-    Hydrates state from SQLite and triggers LangGraph CRAG.
-    """
-    import asyncio
-    form_data = await request.form()
-    incoming_msg = form_data.get('Body', '').strip()
-    sender_number = form_data.get('From', '').replace('whatsapp:', '')
-    
-    if not incoming_msg or not sender_number:
-        return "<Response></Response>" # Empty valid TwiML
-        
-    logger.info(f"Received WhatsApp message from {sender_number}: '{incoming_msg}'")
-    
-    # Trigger background observer agent to extract zero-shot interests
-    asyncio.create_task(observe_conversation(sender_number, incoming_msg))
-    
-    # 1. State Hydration from SQLite
-    db = SessionLocal()
-    user_interests = []
-    try:
-        user = db.query(User).filter(User.phone_number == sender_number).first()
-        if user:
-            user_interests = [i.topic for i in user.interests]
-        else:
-            # Auto-register new user
-            new_user = User(phone_number=sender_number)
-            db.add(new_user)
-            db.commit()
-            
-            # Solve cold start: assign a default interest so they get a brief tomorrow
-            default_interest = Interest(topic="Top News", user_id=new_user.id)
-            db.add(default_interest)
-            db.commit()
-    finally:
-        db.close()
-        
-    # 2. Execute RAG / LangGraph
-    try:
-        # Pass interests to the query engine for metadata filtering
-        answer = await query_news_rag(incoming_msg, sender_number, user_interests)
-    except Exception as e:
-        logger.error(f"Error executing RAG query: {str(e)}")
-        answer = "Sorry, I encountered an error processing your news request."
-
-    # 3. Return TwiML response
-    from twilio.twiml.messaging_response import MessagingResponse
-    resp = MessagingResponse()
-    resp.message(answer)
-    return str(resp)
+# NOTE: Twilio/WhatsApp webhook removed (ADR-1 — Telegram is the only
+# delivery channel in v1; Twilio code paths deleted in Phase 0).
 
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
     """
     Receives incoming messages from Telegram.
     Hydrates state from SQLite and triggers LangGraph CRAG.
+
+    NOTE: this still hydrates/creates users keyed on the retired
+    `User.phone_number` column. The full ADR-1/ADR-2 rewrite — routing
+    through newsagg.bot.handlers.handle_update() and keying users on
+    telegram_chat_id — is Phase 3 work.
     """
     import asyncio
     try:
         data = await request.json()
     except Exception:
         return {"status": "ok"}
-        
+
     message_obj = data.get('message')
     if not message_obj or 'text' not in message_obj:
         return {"status": "ok"}
-        
+
     incoming_msg = message_obj['text'].strip()
     sender_number = str(message_obj['chat']['id'])
-    
+
     logger.info(f"Received Telegram message from {sender_number}: '{incoming_msg}'")
-    
+
     asyncio.create_task(observe_conversation(sender_number, incoming_msg))
-    
+
     db = SessionLocal()
     user_interests = []
     try:
@@ -141,14 +92,14 @@ async def telegram_webhook(request: Request):
             db.commit()
     finally:
         db.close()
-        
+
     try:
         answer = await query_news_rag(incoming_msg, sender_number, user_interests)
     except Exception as e:
         logger.error(f"Error executing RAG query: {str(e)}")
         answer = "Sorry, I encountered an error processing your news request."
 
-    from config import TELEGRAM_BOT_TOKEN
+    from newsagg.config import TELEGRAM_BOT_TOKEN
     if TELEGRAM_BOT_TOKEN:
         import httpx
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -170,9 +121,9 @@ async def handle_query(request: QueryRequest):
     query_str = request.query.strip()
     if not query_str:
         raise HTTPException(status_code=400, detail="Query string cannot be empty.")
-        
+
     logger.info(f"Received query request: '{query_str}'")
-    
+
     db = SessionLocal()
     user_interests = []
     try:
@@ -181,7 +132,7 @@ async def handle_query(request: QueryRequest):
             user_interests = [i.topic for i in user.interests]
     finally:
         db.close()
-        
+
     try:
         from fastapi.responses import StreamingResponse
         return StreamingResponse(
@@ -194,15 +145,20 @@ async def handle_query(request: QueryRequest):
 
 @app.get("/brief")
 def get_daily_brief():
-    """Reads and returns the local daily_brief.json compiled by the consolidation engine."""
-    brief_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "daily_brief.json")
-    
+    """Reads and returns the local daily_brief.json compiled by the consolidation engine.
+
+    NOTE: Phase 6 replaces this with GET /brief/{chat_id} reading the
+    Brief table in Postgres (ADR-7) — this file-based endpoint is
+    retired then.
+    """
+    brief_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "daily_brief.json")
+
     if not os.path.exists(brief_path):
         raise HTTPException(
-            status_code=404, 
-            detail="Daily Brief has not been generated yet. Run processor/daily_brief.py first."
+            status_code=404,
+            detail="Daily Brief has not been generated yet."
         )
-        
+
     try:
         with open(brief_path, "r") as f:
             data = json.load(f)
@@ -211,8 +167,12 @@ def get_daily_brief():
         logger.error(f"Failed to read daily brief file: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to read the daily brief document.")
 
-if __name__ == "__main__":
-    import uvicorn
-    # Start the async ASGI web server on port 8050
-    uvicorn.run("api.main:app", host="0.0.0.0", port=8050, reload=True)
 
+def main():
+    """Entry point for the `newsagg-api` console script (wraps uvicorn.run)."""
+    import uvicorn
+    uvicorn.run("newsagg.api.main:app", host="0.0.0.0", port=8050, reload=True)
+
+
+if __name__ == "__main__":
+    main()

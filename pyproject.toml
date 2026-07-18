@@ -1,0 +1,42 @@
+[project]
+name = "newsagg"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "aiokafka==0.12.0",
+    "chromadb==0.6.3",
+    "fastapi==0.115.8",
+    "uvicorn[standard]==0.34.0",
+    "openai==1.61.0",
+    "google-genai==1.2.0",
+    "sentence-transformers==3.3.1",
+    "pydantic==2.10.6",
+    "python-dotenv==1.0.1",
+    "httpx==0.28.1",
+    "feedparser==6.0.11",
+    "beautifulsoup4==4.12.3",
+    "langgraph==1.2.7",
+    "langchain-core==1.4.8",
+    "sqlalchemy==2.0.51",
+    "psycopg2-binary==2.9.10",
+    "alembic==1.18.5",
+    "duckduckgo-search==5.3.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-asyncio", "pytest-mock", "respx"]
+
+[project.scripts]
+newsagg-producer  = "newsagg.ingestion.producer:main"
+newsagg-triage    = "newsagg.ingestion.triage:main"
+newsagg-storage   = "newsagg.storage.consumer:main"
+newsagg-bot       = "newsagg.bot.poller:main"
+newsagg-scheduler = "newsagg.scheduler.main:main"
+newsagg-api       = "newsagg.api.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["newsagg*"]

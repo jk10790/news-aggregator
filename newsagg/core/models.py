@@ -8,8 +8,8 @@ from typing import Optional
 class ArticleRaw(BaseModel):
     """
     Contract representing the raw, unprocessed article parsed from RSS feeds.
-    Published by: ingestion/producer.py
-    Consumed by: ingestion/consumer_triage.py
+    Published by: newsagg/ingestion/producer.py
+    Consumed by: newsagg/ingestion/triage.py
     """
     source: str = Field(description="Name of the source feed (e.g. techcrunch)")
     title: str = Field(description="The headline of the article")
@@ -22,8 +22,8 @@ class ArticleVerified(ArticleRaw):
     """
     Contract representing a verified article that has passed the LLM triage check.
     Inherits all fields from ArticleRaw and adds the triage reasoning.
-    Published by: ingestion/consumer_triage.py
-    Consumed by: storage/consumer_storage.py
+    Published by: newsagg/ingestion/triage.py
+    Consumed by: newsagg/storage/consumer.py
     """
     triage_reason: str = Field(description="LLM explanation of why this article is relevant")
     topics: list[str] = Field(default_factory=list, description="Categorized topics")

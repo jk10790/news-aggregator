@@ -38,46 +38,32 @@ RSS_FEEDS = {
     # "dev_to": "https://dev.to/feed",
     # "stackoverflow_blog": "https://stackoverflow.blog/feed/",
     # "infoq": "https://feed.infoq.com/",
-    
+
     # Engineering & Cloud Infrastructure
     # "aws_blog": "https://aws.amazon.com/blogs/aws/feed/",
     # "cloudflare_blog": "https://blog.cloudflare.com/rss/",
     # "github_blog": "https://github.blog/feed/",
     # "martin_fowler": "https://martinfowler.com/feed.atom",
     # "smashing_magazine": "https://www.smashingmagazine.com/feed/",
-    
+
     # Startups & Venture Capital
     "yc_blog": "https://blog.ycombinator.com/feed/"
 }
 
 # =========================================================================
-# 2. Application & LLM Environment Settings
+# 2. LLM gateway settings (ADR-3 — the actual client construction and all
+#    retry/backoff/fallback logic live only in newsagg/core/llm.py)
 # =========================================================================
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+TAUT_URL = os.getenv("TAUT_URL", "http://localhost:8000/v1")
 
-# Resolve provider-specific rate delay, retries, and backoff settings
-if LLM_PROVIDER == "gemini":
-    RATE_DELAY_SECONDS = float(os.getenv("GEMINI_RATE_DELAY", "13.0"))
-    BACKOFF_BASE_SECONDS = 5.0
-    MAX_RETRIES = 3
-elif LLM_PROVIDER == "ollama":
-    RATE_DELAY_SECONDS = float(os.getenv("OLLAMA_RATE_DELAY", "0.0"))
-    BACKOFF_BASE_SECONDS = 1.0
-    MAX_RETRIES = 2
-else:
-    RATE_DELAY_SECONDS = 2.0
-    BACKOFF_BASE_SECONDS = 2.0
-    MAX_RETRIES = 3
-
+# =========================================================================
+# 3. Infrastructure endpoints
+# =========================================================================
 REDPANDA_BROKER = os.getenv("REDPANDA_BROKER", "localhost:9092")
 CHROMA_SERVER_HOST = os.getenv("CHROMA_SERVER_HOST", "localhost")
 CHROMA_SERVER_PORT = os.getenv("CHROMA_SERVER_PORT", "8002")
 CHROMA_RETENTION_DAYS = int(os.getenv("CHROMA_RETENTION_DAYS", "7"))
-TAUT_URL = os.getenv("TAUT_URL", "http://localhost:8000/v1")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/news_aggregator")
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
@@ -85,14 +71,15 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 TOPIC_RAW_ARTICLES = "raw-articles"
 TOPIC_VERIFIED_ARTICLES = "verified-articles"
 
-# Messaging Configuration
-MESSAGING_PROVIDER = os.getenv("MESSAGING_PROVIDER", "twilio").lower()
-
-# Twilio Configuration
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_WHATSAPP_SENDER = os.getenv("TWILIO_WHATSAPP_SENDER", "whatsapp:+14155238886")
-
-# Telegram Configuration
+# =========================================================================
+# 4. Telegram (ADR-1/ADR-2 — the ONE product bot; no per-user bot tokens,
+#    no Twilio/WhatsApp)
+# =========================================================================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_POLL_TIMEOUT = int(os.getenv("TELEGRAM_POLL_TIMEOUT", "50"))
 
+# =========================================================================
+# 5. Brief generation tuning (ADR-5 — topic-centric brief engine)
+# =========================================================================
+BRIEF_LOOKBACK_HOURS = int(os.getenv("BRIEF_LOOKBACK_HOURS", "24"))
+TOPIC_MODULE_MAX_ARTICLES = int(os.getenv("TOPIC_MODULE_MAX_ARTICLES", "5"))

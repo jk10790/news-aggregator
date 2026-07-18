@@ -1,24 +1,15 @@
 import logging
-import os
-import sys
 from typing import List, TypedDict
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
-import json
-from openai import AsyncOpenAI
 
-# Dynamic path resolution to import from parent directory (project root)
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from database import SessionLocal, User, Interest
-from config import OLLAMA_MODEL, TAUT_URL
+from newsagg.db.database import SessionLocal
+from newsagg.db.schema import User, Interest
+from newsagg.core.llm import complete
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
-# Initialize LLM Client pointing to Taut Proxy
-taut_client = AsyncOpenAI(base_url=TAUT_URL, api_key="placeholder")
 
 # =========================================================================
 # Observer Agent LangGraph State & Models
@@ -38,34 +29,39 @@ class InterestExtraction(BaseModel):
 # Nodes
 # =========================================================================
 async def extract_interests_node(state: ObserverState) -> ObserverState:
-    """Extracts potential interests from the latest message."""
+    """Extracts potential interests from the latest message.
+
+    NOTE: routed through newsagg.core.llm.complete (ADR-3) as of Phase 1.
+    Constraining the extraction to the taxonomy (Literal[...] of
+    taxonomy.SLUGS) and the negative-sentiment guard are Phase 7 work.
+    """
     latest_msg = state["message_history"][-1]
-    prompt = f"""
-    You are an AI observing a user's conversational history.
+    system_prompt = "You are an AI observing a user's conversational history."
+    user_prompt = f"""
     Based on their latest message, extract any implied topics of interest.
     For example, if they ask about "SpaceX", output "Aerospace".
-    
+
     Current Interests: {state['current_interests']}
     Latest Message: "{latest_msg}"
-    
+
     Output strictly in JSON. You must return a JSON object with exactly two keys: "topics" (a list of strings) and "confidence" (a list of floats between 0.0 and 1.0). You MUST extract at least one interest. Example: {{"topics": ["Aerospace"], "confidence": [0.95]}}
     """
-    
+
     try:
-        response = await taut_client.chat.completions.create(
-            model=f"ollama/{OLLAMA_MODEL}",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            extra_headers={"X-Taut-System": "NewsAggregator", "X-Taut-Context": "Observer"}
+        text = await complete(
+            tier="simple",
+            system=system_prompt,
+            user=user_prompt,
+            context="Observer",
         )
-        extraction = InterestExtraction.model_validate_json(response.choices[0].message.content)
+        extraction = InterestExtraction.model_validate_json(text)
         state["proposed_interests"] = extraction.topics
         state["confidence_scores"] = extraction.confidence
     except Exception as e:
         logger.error(f"Interest extraction failed: {e}")
         state["proposed_interests"] = []
         state["confidence_scores"] = []
-        
+
     return state
 
 async def update_db_node(state: ObserverState) -> ObserverState:
@@ -121,7 +117,7 @@ async def observe_conversation(phone_number: str, incoming_msg: str):
             current_interests = [i.topic for i in user.interests]
     finally:
         db.close()
-        
+
     initial_state = ObserverState(
         phone_number=phone_number,
         message_history=[incoming_msg],
@@ -129,6 +125,6 @@ async def observe_conversation(phone_number: str, incoming_msg: str):
         proposed_interests=[],
         confidence_scores=[]
     )
-    
+
     # Run the observer flow
     await observer_app.ainvoke(initial_state)

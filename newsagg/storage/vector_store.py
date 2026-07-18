@@ -2,17 +2,12 @@ import datetime
 import email.utils
 import hashlib
 import logging
-import os
 import re
-import sys
-
-# Dynamic path resolution to import from parent directory (project root)
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sentence_transformers import SentenceTransformer
 import chromadb
-from config import CHROMA_SERVER_HOST, CHROMA_SERVER_PORT, EMBEDDING_MODEL
-from models import ArticleVerified
+from newsagg.config import CHROMA_SERVER_HOST, CHROMA_SERVER_PORT, EMBEDDING_MODEL
+from newsagg.core.models import ArticleVerified
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

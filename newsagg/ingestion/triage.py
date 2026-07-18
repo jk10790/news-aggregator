@@ -2,24 +2,15 @@ import asyncio
 import json
 import logging
 import os
-import sys
-from openai import AsyncOpenAI
-
-# Dynamic path resolution to import config from parent directory (project root)
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from config import (
-    LLM_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_HOST, OLLAMA_MODEL,
-    REDPANDA_BROKER, TOPIC_RAW_ARTICLES, TOPIC_VERIFIED_ARTICLES,
-    RATE_DELAY_SECONDS, BACKOFF_BASE_SECONDS, MAX_RETRIES, TAUT_URL
-)
-from models import ArticleRaw, ArticleVerified
-from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
-from opentelemetry import trace
-from pydantic import BaseModel
 from typing import Literal
 
-tracer = trace.get_tracer(__name__)
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from pydantic import BaseModel
+
+from newsagg.config import REDPANDA_BROKER, TOPIC_RAW_ARTICLES, TOPIC_VERIFIED_ARTICLES
+from newsagg.core.models import ArticleRaw, ArticleVerified
+from newsagg.core.llm import complete
+
 
 class TriageOutput(BaseModel):
     relevant: bool
@@ -44,13 +35,16 @@ except FileNotFoundError:
     logger.error(f"Prompt files not found. Exiting.")
     exit(1)
 
-# Initialize LLM Client pointing to Taut Proxy
-taut_client = AsyncOpenAI(base_url=TAUT_URL, api_key="placeholder")
 
 async def query_llm_triage(title: str, source: str, summary: str) -> dict:
     """
-    Sends the article to the configured LLM provider via Taut proxy and returns the parsed JSON decision.
-    Implements basic retries for robustness.
+    Sends the article through the shared LLM gateway (newsagg.core.llm.complete,
+    ADR-3) and returns the parsed JSON decision. `core.llm.complete` already
+    implements the Taut -> Gemini fallback and retries internally.
+
+    NOTE: this still returns a raw dict rather than validating against
+    TriageOutput end-to-end (taxonomy-slug mapping, key_insights plumbing) —
+    that tightening is Phase 4 work.
     """
     system_prompt = TRIAGE_SYSTEM_PROMPT
     user_prompt = TRIAGE_USER_PROMPT.format(
@@ -58,38 +52,22 @@ async def query_llm_triage(title: str, source: str, summary: str) -> dict:
         source=source,
         summary=summary
     )
-    
-    model_name = f"gemini/{GEMINI_MODEL}" if LLM_PROVIDER == "gemini" else f"ollama/{OLLAMA_MODEL}"
-    
-    for attempt in range(MAX_RETRIES):
-        try:
-            with tracer.start_as_current_span("llm_triage_query"):
-                response = await taut_client.beta.chat.completions.parse(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    response_format=TriageOutput,
-                    extra_headers={
-                        "X-Taut-System": "NewsAggregator",
-                        "X-Taut-Context": "Triage-Agent"
-                    }
-                )
-            return response.choices[0].message.parsed.model_dump()
-                
-        except Exception as e:
-            delay = BACKOFF_BASE_SECONDS * (2 ** attempt)  # Exponential backoff
-            logger.warning(f"LLM query failed (attempt {attempt + 1}/{MAX_RETRIES}): {str(e)}. Retrying in {delay}s...")
-            await asyncio.sleep(delay)
-            
-    # If all retries fail, default to false (safe fallback)
-    logger.error(f"All LLM triage attempts failed for: '{title}'. Marking as irrelevant.")
-    return {"relevant": False, "reasoning": "LLM connection failed after multiple retries.", "topics": [], "entities": []}
+
+    try:
+        text = await complete(
+            tier="simple",
+            system=system_prompt,
+            user=user_prompt,
+            context="Triage-Agent",
+        )
+        return json.loads(text)
+    except Exception as e:
+        logger.error(f"LLM triage query failed for '{title}': {str(e)}")
+        return {"relevant": False, "reasoning": "LLM connection failed after multiple retries.", "topics": [], "entities": []}
 
 async def main():
-    logger.info(f"Starting Triage Consumer (Provider: {LLM_PROVIDER.upper()})...")
-    
+    logger.info("Starting Triage Consumer...")
+
     # 1. Initialize Redpanda Consumer
     # We assign a group_id "triage-group" so Redpanda tracks our offsets.
     # auto_offset_reset="earliest" ensures we read all raw articles from the beginning if it is a new group.
@@ -100,17 +78,17 @@ async def main():
         auto_offset_reset="earliest",
         enable_auto_commit=True
     )
-    
+
     # 2. Initialize Redpanda Producer to write validated articles
     producer = AIOKafkaProducer(bootstrap_servers=REDPANDA_BROKER)
-    
+
     await consumer.start()
     await producer.start()
     logger.info("Successfully connected to Redpanda broker.")
-    
+
     total_processed = 0
     accepted_count = 0
-    
+
     try:
         while True:
             # 3. Read raw messages with a 5-second timeout (continuous polling)
@@ -119,23 +97,23 @@ async def main():
                 msg = await asyncio.wait_for(consumer.getone(), timeout=5.0)
             except asyncio.TimeoutError:
                 continue
-                
+
             # Decode and validate the message using our ArticleRaw contract
             article = ArticleRaw.model_validate_json(msg.value.decode("utf-8"))
             total_processed += 1
-            
+
             logger.info(f"[{total_processed}] Triaging: '{article.title}' ({article.source})")
-            
+
             # 4. Query LLM for triage decision
             decision = await query_llm_triage(article.title, article.source, article.summary)
-            
+
             is_relevant = decision.get("relevant", False)
             reasoning = decision.get("reasoning", "No explanation.")
-            
+
             if is_relevant:
                 accepted_count += 1
                 logger.info(f"   🟢 ACCEPTED: {reasoning}")
-                
+
                 # Instantiate the ArticleVerified contract
                 verified_article = ArticleVerified(
                     **article.model_dump(),
@@ -143,13 +121,13 @@ async def main():
                     topics=decision.get("topics", []),
                     entities=decision.get("entities", [])
                 )
-                
+
                 # Publish the serialized verified article to Redpanda
                 serialized_verified = verified_article.model_dump_json().encode("utf-8")
                 await producer.send_and_wait(TOPIC_VERIFIED_ARTICLES, value=serialized_verified)
             else:
                 logger.info(f"   🔴 REJECTED: {reasoning}")
-                
+
     except Exception as e:
         logger.error(f"Error in Consumer Triage loop: {str(e)}")
     finally:

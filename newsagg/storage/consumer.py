@@ -1,16 +1,11 @@
 import asyncio
 import json
 import logging
-import os
-import sys
-
-# Dynamic path resolution to import from parent directory (project root)
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aiokafka import AIOKafkaConsumer
-from config import REDPANDA_BROKER, TOPIC_VERIFIED_ARTICLES
-from vector_store import store_article
-from models import ArticleVerified
+from newsagg.config import REDPANDA_BROKER, TOPIC_VERIFIED_ARTICLES
+from newsagg.storage.vector_store import store_article
+from newsagg.core.models import ArticleVerified
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

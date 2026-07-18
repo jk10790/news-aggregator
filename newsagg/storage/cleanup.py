@@ -1,13 +1,8 @@
 import datetime
 import logging
-import os
-import sys
 
-# Dynamic path resolution to import from parent directory
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from storage.vector_store import get_or_create_collection
-from config import CHROMA_RETENTION_DAYS
+from newsagg.storage.vector_store import get_or_create_collection
+from newsagg.config import CHROMA_RETENTION_DAYS
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

@@ -2,17 +2,13 @@ import asyncio
 import json
 import logging
 import html
-import os
-import sys
+import re
 import feedparser
 from bs4 import BeautifulSoup
 
-# Dynamic path resolution to import config from parent directory (project root)
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from aiokafka import AIOKafkaProducer
-from config import RSS_FEEDS, REDPANDA_BROKER, TOPIC_RAW_ARTICLES
-from models import ArticleRaw
+from newsagg.config import RSS_FEEDS, REDPANDA_BROKER, TOPIC_RAW_ARTICLES
+from newsagg.core.models import ArticleRaw
 
 # Setup logging to print nicely in the console
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -36,8 +32,7 @@ async def fetch_and_parse_feed(feed_name: str, feed_url: str) -> list:
             clean_summary = html.unescape(summary_raw)
             # Simple regex/replace to strip basic HTML tags if any exist
             clean_summary = BeautifulSoup(clean_summary, "html.parser").get_text(separator=" ").strip()
-            
-            import re
+
             noise_patterns = [
                 r"(?i)\bclick here\b",
                 r"(?i)\bsubscribe to our newsletter\b",

@@ -14,6 +14,12 @@ from newsagg.core.models import ArticleRaw
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# Boilerplate scrubber (Phase 4): drop sentences that are newsletter/marketing
+# noise rather than actual article content.
+BOILERPLATE_PATTERN = re.compile(
+    r"(?i)(subscribe|sign up|newsletter|click here|read more|share (this|on)|follow us)"
+)
+
 async def fetch_and_parse_feed(feed_name: str, feed_url: str) -> list:
     """
     Asynchronously fetches and parses a single RSS feed.
@@ -33,16 +39,9 @@ async def fetch_and_parse_feed(feed_name: str, feed_url: str) -> list:
             # Simple regex/replace to strip basic HTML tags if any exist
             clean_summary = BeautifulSoup(clean_summary, "html.parser").get_text(separator=" ").strip()
 
-            noise_patterns = [
-                r"(?i)\bclick here\b",
-                r"(?i)\bsubscribe to our newsletter\b",
-                r"(?i)\bshare this on twitter\b",
-                r"(?i)\bread more\b",
-                r"(?i)\bsign up\b"
-            ]
-            # Split by basic sentence delimiters and filter out noisy sentences
+            # Split by basic sentence delimiters and drop boilerplate/marketing sentences
             sentences = [s.strip() for s in re.split(r'(?<=[.!?]) +', clean_summary) if s.strip()]
-            clean_summary = " ".join([s for s in sentences if not any(re.search(p, s) for p in noise_patterns)])
+            clean_summary = " ".join(s for s in sentences if not BOILERPLATE_PATTERN.search(s))
             
             article = ArticleRaw(
                 source=feed_name,

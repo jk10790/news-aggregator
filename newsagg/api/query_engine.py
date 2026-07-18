@@ -1,19 +1,29 @@
+"""Conversational RAG (CRAG) engine.
+
+Corrective-RAG shape: route intent -> translate query -> vector retrieve ->
+grade context -> (optional) web-search fallback -> generate. All LLM calls
+go through newsagg.core.llm.complete (ADR-3); all embeddings go through
+newsagg.core.embeddings (ADR-8). Retrieval filters on vector similarity +
+published_int range + type ONLY — no user-interest filtering (ADR-12).
+
+Nothing heavy (SentenceTransformer, Chroma client) is instantiated at
+import time — this module must import cleanly with docker down.
+"""
 import datetime
+import json
 import logging
 import os
 from typing import Optional, List, TypedDict
+
 from pydantic import BaseModel, Field
-import json
 from langgraph.graph import StateGraph, END
-
-from chromadb import HttpClient
-from sentence_transformers import SentenceTransformer
 from langgraph.checkpoint.memory import MemorySaver
-from newsagg.config import CHROMA_SERVER_HOST, CHROMA_SERVER_PORT, EMBEDDING_MODEL
-from newsagg.core.llm import complete
+from duckduckgo_search import DDGS
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+from newsagg.config import CHROMA_SERVER_HOST, CHROMA_SERVER_PORT
+from newsagg.core.llm import complete
+from newsagg.core.embeddings import embed
+
 logger = logging.getLogger(__name__)
 
 # Load RAG Prompt template
@@ -23,37 +33,46 @@ try:
         RAG_PROMPT_TEMPLATE = f.read()
 except FileNotFoundError:
     logger.error("RAG prompt template file not found. Exiting.")
-    exit(1)
+    raise
 
-# Initialize Embedding Model (locally on CPU)
-# NOTE: routing this through the shared newsagg.core.embeddings module
-# (ADR-8, "never rely on Chroma's default embedder / mixed embedding
-# sources") is Phase 7 work; this Phase 1 pass only removes the
-# module-local OpenAI client per ADR-3.
-logger.info(f"Initializing local SentenceTransformer for query embedding... Model: {EMBEDDING_MODEL}")
-embedding_model = SentenceTransformer(EMBEDDING_MODEL)
-
-# Connect to ChromaDB database service
+# =========================================================================
+# Lazy Chroma accessor (ADR-8: never connect / never instantiate at import)
+# =========================================================================
 _chroma_client = None
 _collection = None
+
 
 def get_chroma_collection():
     global _chroma_client, _collection
     if _collection is None:
+        import chromadb
+
         logger.info(f"Connecting to ChromaDB at {CHROMA_SERVER_HOST}:{CHROMA_SERVER_PORT}...")
-        _chroma_client = HttpClient(host=CHROMA_SERVER_HOST, port=int(CHROMA_SERVER_PORT))
+        _chroma_client = chromadb.HttpClient(host=CHROMA_SERVER_HOST, port=int(CHROMA_SERVER_PORT))
         _collection = _chroma_client.get_or_create_collection("news_archive")
     return _collection
 
+
+# =========================================================================
+# Structured output schemas
+# =========================================================================
 class TranslatedQuery(BaseModel):
     semantic_query: str = Field(description="Core search terms stripped of time-related words")
-    days_offset_start: Optional[int] = Field(default=None)
-    days_offset_end: Optional[int] = Field(default=None)
+    days_offset_start: Optional[int] = Field(default=None, description="Days before today the search window starts, or null for no date filter")
+    days_offset_end: Optional[int] = Field(default=None, description="Days before today the search window ends, or null for no date filter")
+
+
+class ContextGrade(BaseModel):
+    score: float = Field(description="Score between 0.0 and 1.0 indicating if context is sufficient to answer the query")
+    reasoning: str = Field(description="Brief explanation for the score")
+
+
+SUFFICIENT_SCORE_THRESHOLD = 0.7
+
 
 class GraphState(TypedDict):
     query: str
-    phone_number: str
-    interests: List[str]
+    chat_id: str
     semantic_query: str
     context_articles: List[dict]
     context_text: str
@@ -62,37 +81,44 @@ class GraphState(TypedDict):
     intent: str
     grade: str
 
-async def translate_query(user_query: str) -> TranslatedQuery:
+
+# =========================================================================
+# Nodes
+# =========================================================================
+async def translate_query(user_query: str, chat_id: str) -> TranslatedQuery:
     today_str = datetime.date.today().isoformat()
-    prompt = f"Translate query to date offsets for TODAY {today_str}.\nQuery: '{user_query}'\n\nExample 1: Query: 'news about AI from last 3 days', Output: {{\"semantic_query\": \"AI\", \"days_offset_start\": 3, \"days_offset_end\": 0}}\nExample 2: Query: 'what happened with SpaceX yesterday?', Output: {{\"semantic_query\": \"SpaceX\", \"days_offset_start\": 1, \"days_offset_end\": 1}}"
+    prompt = (
+        f"Translate query to date offsets for TODAY {today_str}.\n"
+        f"Query: '{user_query}'\n\n"
+        "Example 1: Query: 'news about AI from last 3 days' -> "
+        "semantic_query='AI', days_offset_start=3, days_offset_end=0\n"
+        "Example 2: Query: 'what happened with SpaceX yesterday?' -> "
+        "semantic_query='SpaceX', days_offset_start=1, days_offset_end=1\n"
+        "Example 3: Query: 'tell me about the latest on Kubernetes' (no time reference) -> "
+        "semantic_query='Kubernetes', days_offset_start=null, days_offset_end=null"
+    )
 
     try:
-        translated = await complete(
+        return await complete(
             tier="simple",
             system="You translate a user's news query into a semantic search term plus a date range.",
             user=prompt,
             response_model=TranslatedQuery,
-            context="RAG-Translation",
+            namespace=str(chat_id),
+            context="translate",
         )
-        return translated
     except Exception as e:
         logger.error(f"Translation failed: {e}")
         return TranslatedQuery(semantic_query=user_query, days_offset_start=None, days_offset_end=None)
 
-async def execute_hybrid_search(translated: TranslatedQuery, interests: List[str]) -> list[dict]:
-    query_vector = embedding_model.encode(translated.semantic_query).tolist()
 
-    # Pre-filtering constraints including user interests
+async def execute_hybrid_search(translated: TranslatedQuery) -> list[dict]:
+    """Vector similarity + published_int range + type filter ONLY (ADR-12:
+    no user-interest filtering in retrieval — the Observer's interest
+    tracking is a separate concern from what gets retrieved here)."""
+    query_vector = embed([translated.semantic_query])[0]
+
     and_clauses = [{"type": {"$eq": "child"}}]
-
-    if interests:
-        # Filter by topics in user interests
-        # We assume the metadata contains a "topic" field
-        topic_clauses = [{"topic": {"$eq": interest}} for interest in interests]
-        if len(topic_clauses) > 1:
-            and_clauses.append({"$or": topic_clauses})
-        elif len(topic_clauses) == 1:
-            and_clauses.append(topic_clauses[0])
 
     if translated.days_offset_start is not None and translated.days_offset_end is not None:
         today = datetime.date.today()
@@ -107,7 +133,7 @@ async def execute_hybrid_search(translated: TranslatedQuery, interests: List[str
     results = collection.query(
         query_embeddings=[query_vector],
         n_results=8,
-        where=where_filter
+        where=where_filter,
     )
 
     context_articles = []
@@ -124,9 +150,10 @@ async def execute_hybrid_search(translated: TranslatedQuery, interests: List[str
                     "title": parent_result.get("metadatas", [{}])[0].get("title", "No Title"),
                     "source": parent_result.get("metadatas", [{}])[0].get("source", "Unknown"),
                     "url": parent_result.get("metadatas", [{}])[0].get("url", ""),
-                    "content": parent_result.get("documents", [""])[0]
+                    "content": parent_result.get("documents", [""])[0],
                 })
     return context_articles
+
 
 async def router_node(state: GraphState) -> GraphState:
     query = state["query"]
@@ -136,16 +163,18 @@ async def router_node(state: GraphState) -> GraphState:
         tier="simple",
         system="You are a message router.",
         user=prompt,
-        context="RAG-Router",
+        namespace=str(state["chat_id"]),
+        context="router",
     )
     intent = intent.strip().lower()
     state["intent"] = "greeting" if "greeting" in intent else "news"
     return state
 
+
 async def research_node(state: GraphState) -> GraphState:
-    translated = await translate_query(state["query"])
+    translated = await translate_query(state["query"], state["chat_id"])
     state["semantic_query"] = translated.semantic_query
-    context = await execute_hybrid_search(translated, state["interests"])
+    context = await execute_hybrid_search(translated)
     state["context_articles"] = context
 
     context_text = ""
@@ -154,9 +183,6 @@ async def research_node(state: GraphState) -> GraphState:
     state["context_text"] = context_text
     return state
 
-class EvaluationResult(BaseModel):
-    score: float = Field(description="Score between 0.0 and 1.0 indicating if context is sufficient")
-    reasoning: str = Field(description="Explanation for the score")
 
 async def evaluator_node(state: GraphState) -> GraphState:
     if not state["context_articles"]:
@@ -166,33 +192,36 @@ async def evaluator_node(state: GraphState) -> GraphState:
     prompt = f"Does the following context contain enough information to answer the query? Context: {state['context_text']}\nQuery: {state['query']}"
 
     try:
-        eval_res = await complete(
+        grade_result = await complete(
             tier="simple",
             system="You grade whether retrieved context is sufficient to answer a query.",
             user=prompt,
-            response_model=EvaluationResult,
-            context="RAG-Evaluator",
+            response_model=ContextGrade,
+            namespace=str(state["chat_id"]),
+            context="evaluator",
         )
-        state["grade"] = "sufficient" if eval_res.score >= 0.7 else "insufficient"
+        state["grade"] = "sufficient" if grade_result.score >= SUFFICIENT_SCORE_THRESHOLD else "insufficient"
     except Exception as e:
         logger.error(f"Evaluator failed: {e}")
         state["grade"] = "insufficient"
 
     return state
 
-from duckduckgo_search import DDGS
 
 async def web_search_node(state: GraphState) -> GraphState:
     logger.info("Executing Web Search Fallback...")
     try:
-        results = DDGS().text(state['semantic_query'], backend='auto', max_results=3)
-        search_text = "\n".join([f"Web Search Result: {r.get('title', '')} | URL: {r.get('href', '')}\nContent: {r.get('body', '')}" for r in results])
+        results = DDGS().text(state["semantic_query"], backend="auto", max_results=3)
+        search_text = "\n".join(
+            f"Web Search Result: {r.get('title', '')} | URL: {r.get('href', '')}\nContent: {r.get('body', '')}"
+            for r in results
+        )
         state["context_text"] += f"\n{search_text}\n"
     except Exception as e:
         logger.error(f"Web search failed: {e}")
-        state["context_text"] += f"\nWeb Search Result: Latest news on {state['semantic_query']}.\n"
     state["retries"] += 1
     return state
+
 
 async def generate_node(state: GraphState) -> GraphState:
     if state["intent"] == "greeting":
@@ -200,14 +229,13 @@ async def generate_node(state: GraphState) -> GraphState:
         return state
 
     prompt = RAG_PROMPT_TEMPLATE.format(context_text=state["context_text"], query=state["query"])
-    tier = "simple" if state["intent"] == "greeting" else "complex"
 
     response = await complete(
-        tier=tier,
+        tier="complex",
         system="You are a factual, conversational AI news assistant.",
         user=prompt,
-        namespace=state["phone_number"],
-        context="RAG-Generator",
+        namespace=str(state["chat_id"]),
+        context="generate",
         stream=True,
     )
     answer = ""
@@ -218,14 +246,17 @@ async def generate_node(state: GraphState) -> GraphState:
     state["answer"] = answer
     return state
 
+
 # LangGraph Edge Routers
 def route_after_intent(state: GraphState) -> str:
     return "generate" if state["intent"] == "greeting" else "research"
+
 
 def route_after_eval(state: GraphState) -> str:
     if state["grade"] == "sufficient" or state["retries"] >= 1:
         return "generate"
     return "web_search"
+
 
 # Build CRAG Graph
 workflow = StateGraph(GraphState)
@@ -244,38 +275,28 @@ workflow.add_edge("generate", END)
 
 crag_app = workflow.compile(checkpointer=MemorySaver())
 
-async def query_news_rag(user_query: str, user_phone_number: str = "default_user", user_interests: List[str] = None) -> str:
-    user_interests = user_interests or []
-    initial_state = GraphState(
-        query=user_query,
-        phone_number=user_phone_number,
-        interests=user_interests,
+
+def _initial_state(query: str, chat_id: str) -> GraphState:
+    return GraphState(
+        query=query,
+        chat_id=str(chat_id),
         semantic_query="",
         context_articles=[],
         context_text="",
         answer="",
         retries=0,
         intent="",
-        grade=""
+        grade="",
     )
-    config = {"configurable": {"thread_id": user_phone_number}}
-    final_state = await crag_app.ainvoke(initial_state, config=config)
+
+
+async def query_news_rag(query: str, chat_id: str) -> str:
+    config = {"configurable": {"thread_id": str(chat_id)}}
+    final_state = await crag_app.ainvoke(_initial_state(query, chat_id), config=config)
     return final_state["answer"]
 
-async def query_news_rag_stream(user_query: str, user_phone_number: str = "default_user", user_interests: List[str] = None):
-    user_interests = user_interests or []
-    initial_state = GraphState(
-        query=user_query,
-        phone_number=user_phone_number,
-        interests=user_interests,
-        semantic_query="",
-        context_articles=[],
-        context_text="",
-        answer="",
-        retries=0,
-        intent="",
-        grade=""
-    )
-    config = {"configurable": {"thread_id": user_phone_number}}
-    async for chunk in crag_app.astream(initial_state, config=config, stream_mode="updates"):
+
+async def query_news_rag_stream(query: str, chat_id: str):
+    config = {"configurable": {"thread_id": str(chat_id)}}
+    async for chunk in crag_app.astream(_initial_state(query, chat_id), config=config, stream_mode="updates"):
         yield json.dumps(chunk) + "\n"

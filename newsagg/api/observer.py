@@ -1,96 +1,128 @@
+"""Observer agent: passively infers implicit topic interests from a user's
+conversational messages and updates the interests table.
+
+Extraction is constrained to the fixed taxonomy (newsagg.core.taxonomy) via
+a Literal type on the structured-output schema — the LLM cannot invent
+free-form topic strings. All LLM calls go through newsagg.core.llm.complete
+(ADR-3).
+"""
+import datetime
 import logging
-from typing import List, TypedDict
+from typing import List, Literal, Optional, TypedDict
+
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
 
 from newsagg.db.database import SessionLocal
 from newsagg.db.schema import User, Interest
+from newsagg.core import taxonomy
 from newsagg.core.llm import complete
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+CONFIDENCE_THRESHOLD = 0.9
+ENGAGEMENT_BUMP = 0.1
+
+# Slugs the Observer may assign — excludes the "top" pseudo-topic, which is
+# an importance-based bucket, not a genuine interest a user can hold.
+_TOPIC_SLUGS = tuple(t.slug for t in taxonomy.CLASSIFIABLE)
+_TAXONOMY_HINT = ", ".join(f"{t.slug} ({t.label})" for t in taxonomy.CLASSIFIABLE)
+
 
 # =========================================================================
 # Observer Agent LangGraph State & Models
 # =========================================================================
 class ObserverState(TypedDict):
-    phone_number: str
+    chat_id: str
     message_history: List[str]
-    current_interests: List[str]
-    proposed_interests: List[str]
-    confidence_scores: List[float]
+    topic: Optional[str]
+    confidence: float
+
 
 class InterestExtraction(BaseModel):
-    topics: List[str] = Field(description="Implied interests extracted from the user's latest message")
-    confidence: List[float] = Field(description="Confidence score for each topic (0.0 to 1.0)")
+    topic: Optional[Literal[_TOPIC_SLUGS]] = Field(
+        default=None,
+        description="Single taxonomy topic slug implied by the user's latest message, or null if none applies.",
+    )
+    confidence: float = Field(default=0.0, description="Confidence 0.0-1.0 that this is a genuine interest.")
+
 
 # =========================================================================
 # Nodes
 # =========================================================================
 async def extract_interests_node(state: ObserverState) -> ObserverState:
-    """Extracts potential interests from the latest message.
-
-    NOTE: routed through newsagg.core.llm.complete (ADR-3) as of Phase 1.
-    Constraining the extraction to the taxonomy (Literal[...] of
-    taxonomy.SLUGS) and the negative-sentiment guard are Phase 7 work.
-    """
+    """Extracts at most one taxonomy-constrained topic from the latest message."""
     latest_msg = state["message_history"][-1]
-    system_prompt = "You are an AI observing a user's conversational history."
+    system_prompt = "You are an AI observing a user's conversational history to infer their genuine interests."
     user_prompt = f"""
-    Based on their latest message, extract any implied topics of interest.
-    For example, if they ask about "SpaceX", output "Aerospace".
+Based on the user's latest message, decide if it implies interest in exactly one of these topics:
+{_TAXONOMY_HINT}
 
-    Current Interests: {state['current_interests']}
-    Latest Message: "{latest_msg}"
+Latest Message: "{latest_msg}"
 
-    Output strictly in JSON. You must return a JSON object with exactly two keys: "topics" (a list of strings) and "confidence" (a list of floats between 0.0 and 1.0). You MUST extract at least one interest. Example: {{"topics": ["Aerospace"], "confidence": [0.95]}}
-    """
+Rules:
+- Only pick a topic if the message shows genuine positive interest in it (asking about it, sharing enthusiasm, following up on it).
+- If the user is complaining about, criticizing, or expressing negative/annoyed sentiment toward a topic, do NOT extract it — return topic: null.
+- If no topic clearly applies, return topic: null and confidence: 0.0.
+"""
 
     try:
-        text = await complete(
+        extraction = await complete(
             tier="simple",
             system=system_prompt,
             user=user_prompt,
-            context="Observer",
+            response_model=InterestExtraction,
+            namespace=str(state["chat_id"]),
+            context="extract",
         )
-        extraction = InterestExtraction.model_validate_json(text)
-        state["proposed_interests"] = extraction.topics
-        state["confidence_scores"] = extraction.confidence
+        state["topic"] = extraction.topic
+        state["confidence"] = extraction.confidence
     except Exception as e:
-        logger.error(f"Interest extraction failed: {e}")
-        state["proposed_interests"] = []
-        state["confidence_scores"] = []
+        logger.warning(f"Interest extraction failed or produced an invalid topic: {e}")
+        state["topic"] = None
+        state["confidence"] = 0.0
 
     return state
 
+
 async def update_db_node(state: ObserverState) -> ObserverState:
-    """Updates the SQLite DB if confidence threshold > 0.90."""
-    import datetime
+    """Persists the observed topic if confidence clears CONFIDENCE_THRESHOLD.
+
+    New topic -> implicit Interest seeded at engagement_score=confidence.
+    Existing topic (either source) -> last_interacted_at refreshed and
+    engagement_score bumped by ENGAGEMENT_BUMP, capped at 1.0.
+    """
     db = SessionLocal()
     try:
-        user = db.query(User).filter(User.phone_number == state["phone_number"]).first()
-        if user:
-            for topic, conf in zip(state["proposed_interests"], state["confidence_scores"]):
-                logger.info(f"Observer evaluated topic '{topic}' with confidence {conf}")
-                if conf >= 0.90:
-                    if topic not in state["current_interests"]:
-                        logger.info(f"Observer Agent adding new interest '{topic}' (Confidence: {conf}) to user {state['phone_number']}")
-                        new_interest = Interest(topic=topic, user_id=user.id)
-                        db.add(new_interest)
-                    else:
-                        existing = db.query(Interest).filter(Interest.user_id == user.id, Interest.topic == topic).first()
-                        if existing:
-                            existing.last_interacted_at = datetime.datetime.utcnow()
-            db.commit()
+        user = db.query(User).filter(User.telegram_chat_id == str(state["chat_id"])).first()
+        if not user:
+            return state
+
+        topic = state["topic"]
+        existing = db.query(Interest).filter(Interest.user_id == user.id, Interest.topic == topic).first()
+        if existing:
+            existing.last_interacted_at = datetime.datetime.utcnow()
+            existing.engagement_score = min(1.0, (existing.engagement_score or 0.0) + ENGAGEMENT_BUMP)
+            logger.info(f"Observer refreshed existing interest '{topic}' for chat {state['chat_id']}")
+        else:
+            db.add(Interest(
+                user_id=user.id,
+                topic=topic,
+                source="implicit",
+                engagement_score=state["confidence"],
+            ))
+            logger.info(f"Observer added implicit interest '{topic}' (confidence={state['confidence']}) for chat {state['chat_id']}")
+        db.commit()
     finally:
         db.close()
     return state
 
+
 def route_after_extraction(state: ObserverState) -> str:
-    if not state["proposed_interests"]:
+    if not state.get("topic") or state.get("confidence", 0.0) < CONFIDENCE_THRESHOLD:
         return "end"
     return "update"
+
 
 # =========================================================================
 # Graph Construction
@@ -105,26 +137,13 @@ workflow.add_edge("update", END)
 
 observer_app = workflow.compile()
 
-async def observe_conversation(phone_number: str, incoming_msg: str):
-    """
-    Fire-and-forget observation workflow.
-    """
-    db = SessionLocal()
-    current_interests = []
-    try:
-        user = db.query(User).filter(User.phone_number == phone_number).first()
-        if user:
-            current_interests = [i.topic for i in user.interests]
-    finally:
-        db.close()
 
+async def observe_conversation(chat_id: str, text: str):
+    """Fire-and-forget observation workflow, keyed on the Telegram chat id."""
     initial_state = ObserverState(
-        phone_number=phone_number,
-        message_history=[incoming_msg],
-        current_interests=current_interests,
-        proposed_interests=[],
-        confidence_scores=[]
+        chat_id=str(chat_id),
+        message_history=[text],
+        topic=None,
+        confidence=0.0,
     )
-
-    # Run the observer flow
     await observer_app.ainvoke(initial_state)
